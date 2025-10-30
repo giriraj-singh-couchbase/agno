@@ -1,3 +1,4 @@
+from abc import abstractmethod
 import asyncio
 import time
 from datetime import timedelta
@@ -47,12 +48,10 @@ try:
 except ImportError:
     raise ImportError("`couchbase` not installed. Please install using `pip install couchbase`")
 
-
-class CouchbaseSearch(VectorDb):
+class CouchbaseUtils(VectorDb):
     """
-    Couchbase Vector Database implementation with FTS (Full Text Search) index support.
+    Base Couchbase Vector Database implementation.
     """
-
     def __init__(
         self,
         bucket_name: str,
@@ -60,37 +59,14 @@ class CouchbaseSearch(VectorDb):
         collection_name: str,
         couchbase_connection_string: str,
         cluster_options: ClusterOptions,
-        search_index: Union[str, SearchIndex],
         embedder: Embedder = OpenAIEmbedder(),
         overwrite: bool = False,
-        is_global_level_index: bool = False,
-        wait_until_index_ready: float = 0,
         batch_limit: int = 500,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        **kwargs,
     ):
-        """
-        Initialize the CouchbaseSearch with Couchbase connection details.
-
-        Args:
-            bucket_name (str): Name of the Couchbase bucket.
-            scope_name (str): Name of the scope within the bucket.
-            collection_name (str): Name of the collection within the scope.
-            name (Optional[str]): Name of the vector database.
-            description (Optional[str]): Description of the vector database.
-            couchbase_connection_string (str): Couchbase connection string.
-            cluster_options (ClusterOptions): Options for configuring the Couchbase cluster connection.
-            search_index (Union[str, SearchIndex], optional): Search index configuration, either as index name or SearchIndex definition.
-            embedder (Embedder): Embedder instance for generating embeddings. Defaults to OpenAIEmbedder.
-            overwrite (bool): Whether to overwrite existing collection. Defaults to False.
-            wait_until_index_ready (float, optional): Time in seconds to wait until the index is ready. Defaults to 0.
-            batch_limit (int, optional): Maximum number of documents to process in a single batch (applies to both sync and async operations). Defaults to 500.
-            **kwargs: Additional arguments for Couchbase connection.
-        """
         if not bucket_name:
             raise ValueError("Bucket name must not be empty.")
-
         self.bucket_name = bucket_name
         self.scope_name = scope_name
         self.collection_name = collection_name
@@ -98,20 +74,9 @@ class CouchbaseSearch(VectorDb):
         self.cluster_options = cluster_options
         self.embedder = embedder
         self.overwrite = overwrite
-        self.is_global_level_index = is_global_level_index
-        self.wait_until_index_ready = wait_until_index_ready
-        # Initialize base class with name and description
-        super().__init__(name=name, description=description)
-
-        self.kwargs = kwargs
         self.batch_limit = batch_limit
-        if isinstance(search_index, str):
-            self.search_index_name = search_index
-            self.search_index_definition = None
-        else:
-            self.search_index_name = search_index.name
-            self.search_index_definition = search_index
-
+        super().__init__(name=name, description=description)
+        
         self._cluster: Optional[Cluster] = None
         self._bucket: Optional[Bucket] = None
         self._scope: Optional[Scope] = None
@@ -121,7 +86,7 @@ class CouchbaseSearch(VectorDb):
         self._async_bucket: Optional[AsyncBucket] = None
         self._async_scope: Optional[AsyncScope] = None
         self._async_collection: Optional[AsyncCollection] = None
-
+    
     @property
     def cluster(self) -> Cluster:
         """Create or retrieve the Couchbase cluster connection."""
@@ -233,66 +198,6 @@ class CouchbaseSearch(VectorDb):
             except Exception as e:
                 logger.error(f"Error creating collection '{self.collection_name}': {e}")
                 raise
-
-    def _search_indexes_mng(self) -> Union[SearchIndexManager, ScopeSearchIndexManager]:
-        """Get the search indexes manager."""
-        if self.is_global_level_index:
-            return self.cluster.search_indexes()
-        else:
-            return self.scope.search_indexes()
-
-    def _create_fts_index(self):
-        """Create a FTS index on the collection if it doesn't exist."""
-        try:
-            # Check if index exists and handle string index name
-            self._search_indexes_mng().get_index(self.search_index_name)
-            if not self.overwrite:
-                return
-        except Exception:
-            if self.search_index_definition is None:
-                raise ValueError(f"Index '{self.search_index_name}' does not exist")
-
-        # Create or update index
-        try:
-            if self.overwrite:
-                try:
-                    logger.info(f"Dropping existing FTS index '{self.search_index_name}'")
-                    self._search_indexes_mng().drop_index(self.search_index_name)
-                except SearchIndexNotFoundException:
-                    logger.warning(f"Index '{self.search_index_name}' does not exist")
-                except Exception as e:
-                    logger.warning(f"Error dropping index (may not exist): {e}")
-
-            self._search_indexes_mng().upsert_index(self.search_index_definition)
-            logger.info(f"Created FTS index '{self.search_index_name}'")
-
-            if self.wait_until_index_ready:
-                self._wait_for_index_ready()
-
-        except Exception as e:
-            logger.error(f"Error creating FTS index '{self.search_index_name}': {e}")
-            raise
-
-    def _wait_for_index_ready(self):
-        """Wait until the FTS index is ready."""
-        start_time = time.time()
-        while True:
-            try:
-                count = self._search_indexes_mng().get_indexed_documents_count(self.search_index_name)
-                if count > -1:
-                    logger.info(f"FTS index '{self.search_index_name}' is ready")
-                    break
-                # logger.info(f"FTS index '{self.search_index_name}' is not ready yet status: {index['status']}")
-            except Exception as e:
-                if time.time() - start_time > self.wait_until_index_ready:
-                    logger.error(f"Error checking index status: {e}")
-                    raise TimeoutError("Timeout waiting for FTS index to become ready")
-                time.sleep(1)
-
-    def create(self) -> None:
-        """Create the collection and FTS index if they don't exist."""
-        self._create_collection_and_scope()
-        self._create_fts_index()
 
     def insert(self, content_hash: str, documents: List[Document], filters: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -458,85 +363,6 @@ class CouchbaseSearch(VectorDb):
         if errors_occurred:
             logger.warning("Some errors occurred during the upsert operation. Please check logs for details.")
 
-    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
-        """Search the Couchbase bucket for documents relevant to the query."""
-        query_embedding = self.embedder.get_embedding(query)
-        if query_embedding is None:
-            logger.error(f"Failed to generate embedding for query: {query}")
-            return []
-
-        try:
-            # Implement vector search using Couchbase FTS
-            vector_search = VectorSearch.from_vector_query(
-                VectorQuery(field_name="embedding", vector=query_embedding, num_candidates=limit)
-            )
-            request = SearchRequest.create(vector_search)
-
-            # Prepare the options dictionary
-            options_dict = {"limit": limit, "fields": ["*"]}
-            if filters:
-                options_dict["raw"] = filters
-
-            search_args = {
-                "index": self.search_index_name,
-                "request": request,
-                "options": SearchOptions(**options_dict),  # Construct SearchOptions with the dictionary
-            }
-
-            if self.is_global_level_index:
-                results = self.cluster.search(**search_args)
-            else:
-                results = self.scope.search(**search_args)
-
-            return self.__get_doc_from_kv(results)
-        except Exception as e:
-            logger.error(f"Error during search: {e}")
-            raise
-
-    def __get_doc_from_kv(self, response: SearchResult) -> List[Document]:
-        """
-        Convert search results to Document objects by fetching full documents from KV store.
-
-        Args:
-            response: SearchResult from Couchbase search query
-
-        Returns:
-            List of Document objects
-        """
-        documents: List[Document] = []
-        search_hits = [(doc.id, doc.score) for doc in response.rows()]
-
-        if not search_hits:
-            return documents
-
-        # Fetch documents from KV store
-        ids = [hit[0] for hit in search_hits]
-        kv_response = self.collection.get_multi(keys=ids)
-
-        if not kv_response.all_ok:
-            raise Exception(f"Failed to get documents from KV store: {kv_response.exceptions}")
-
-        # Convert results to Documents
-        for doc_id, score in search_hits:
-            get_result = kv_response.results.get(doc_id)
-            if get_result is None or not get_result.success:
-                logger.warning(f"Document {doc_id} not found in KV store")
-                continue
-
-            value = get_result.value
-            documents.append(
-                Document(
-                    id=doc_id,
-                    name=value["name"],
-                    content=value["content"],
-                    meta_data=value["meta_data"],
-                    embedding=value["embedding"],
-                    content_id=value.get("content_id"),
-                )
-            )
-
-        return documents
-
     def drop(self) -> None:
         """Delete the collection from the scope."""
         if self.exists():
@@ -601,17 +427,6 @@ class CouchbaseSearch(VectorDb):
             "content_hash": content_hash,
         }
 
-    def get_count(self) -> int:
-        """Get the count of documents in the Couchbase bucket."""
-        try:
-            search_indexes = self.cluster.search_indexes()
-            if not self.is_global_level_index:
-                search_indexes = self.scope.search_indexes()
-            return search_indexes.get_indexed_documents_count(self.search_index_name)
-        except Exception as e:
-            logger.error(f"Error getting document count: {e}")
-            return 0
-
     def name_exists(self, name: str) -> bool:
         """Check if a document exists in the bucket based on its name."""
         try:
@@ -656,544 +471,9 @@ class CouchbaseSearch(VectorDb):
             logger.error(f"Error checking document content_hash existence: {e}")
             return False
 
-    # === ASYNC SUPPORT USING acouchbase ===
-
-    async def _create_async_cluster_instance(self) -> AsyncCluster:
-        """Helper method to create and connect an AsyncCluster instance."""
-        logger.debug("Creating and connecting new AsyncCluster instance.")
-        cluster = await AsyncCluster.connect(self.connection_string, self.cluster_options)
-        # AsyncCluster.connect ensures the cluster is ready upon successful await.
-        # No explicit wait_until_ready is needed here for AsyncCluster.
-        logger.info("AsyncCluster connected successfully.")
-        return cluster
-
-    async def get_async_cluster(self) -> AsyncCluster:
-        """Gets or creates the cached AsyncCluster instance."""
-        if self._async_cluster is None:
-            logger.debug("AsyncCluster instance not cached, creating new one.")
-            self._async_cluster = await self._create_async_cluster_instance()
-        return self._async_cluster
-
-    async def get_async_bucket(self) -> AsyncBucket:
-        """Gets or creates the cached AsyncBucket instance."""
-        if self._async_bucket is None:
-            logger.debug("AsyncBucket instance not cached, creating new one.")
-            cluster = await self.get_async_cluster()
-            self._async_bucket = cluster.bucket(self.bucket_name)
-        return self._async_bucket
-
-    async def get_async_scope(self) -> AsyncScope:
-        """Gets or creates the cached AsyncScope instance."""
-        if self._async_scope is None:
-            logger.debug("AsyncScope instance not cached, creating new one.")
-            bucket = await self.get_async_bucket()
-            self._async_scope = bucket.scope(self.scope_name)
-        return self._async_scope
-
-    async def get_async_collection(self) -> AsyncCollection:
-        """Gets or creates the cached AsyncCollection instance."""
-        if self._async_collection is None:
-            logger.debug("AsyncCollection instance not cached, creating new one.")
-            scope = await self.get_async_scope()
-            self._async_collection = scope.collection(self.collection_name)
-        return self._async_collection
-
-    async def async_create(self) -> None:
-        # FTS index creation is not supported in acouchbase as of now, so fallback to sync for index creation
-        # This is a limitation of the SDK. You may want to document this.
-        await self._async_create_collection_and_scope()
-        await self._async_create_fts_index()
-
-    async def _async_create_collection_and_scope(self):
-        """
-        Get or create the scope and collection within the bucket.
-
-        Uses EAFP principle: attempts to create scope/collection and handles
-        specific exceptions if they already exist or (for collections with overwrite=True)
-        if they are not found for dropping.
-
-        Raises:
-            Exception: If scope or collection creation/manipulation fails unexpectedly.
-        """
-        # 1. Ensure Scope Exists
-        async_bucket_instance = await self.get_async_bucket()
-        try:
-            await async_bucket_instance.collections().create_scope(self.scope_name)
-            logger.info(f"Created new scope '{self.scope_name}'")
-        except ScopeAlreadyExistsException:
-            logger.info(f"Scope '{self.scope_name}' already exists. Using existing scope.")
-        except Exception as e:
-            logger.error(f"Failed to create or ensure scope '{self.scope_name}' exists: {e}")
-            raise
-
-        collection_manager = async_bucket_instance.collections()
-
-        # 2. Handle Collection
-        if self.overwrite:
-            # Attempt to drop the collection first since overwrite is True
-            try:
-                logger.info(
-                    f"Overwrite is True. Attempting to drop collection '{self.collection_name}' in scope '{self.scope_name}'."
-                )
-                await collection_manager.drop_collection(
-                    collection_name=self.collection_name, scope_name=self.scope_name
-                )
-                logger.info(f"Successfully dropped collection '{self.collection_name}'.")
-                time.sleep(1)  # Brief wait after drop, as in original code
-            except CollectionNotFoundException:
-                logger.info(
-                    f"Collection '{self.collection_name}' not found in scope '{self.scope_name}'. No need to drop."
-                )
-            except Exception as e:
-                logger.error(f"Error dropping collection '{self.collection_name}' during overwrite: {e}")
-                raise
-
-            # Proceed to create the collection
-            try:
-                logger.info(f"Creating collection '{self.collection_name}' in scope '{self.scope_name}'.")
-                await collection_manager.create_collection(
-                    scope_name=self.scope_name, collection_name=self.collection_name
-                )
-                logger.info(
-                    f"Successfully created collection '{self.collection_name}' after drop attempt (overwrite=True)."
-                )
-            except CollectionAlreadyExistsException:
-                # This is an unexpected state if overwrite=True and drop was supposed to clear the way.
-                logger.error(
-                    f"Failed to create collection '{self.collection_name}' as it already exists, "
-                    f"even after drop attempt for overwrite. Overwrite operation may not have completed as intended."
-                )
-                raise  # Re-raise as the overwrite intent failed
-            except Exception as e:
-                logger.error(
-                    f"Error creating collection '{self.collection_name}' after drop attempt (overwrite=True): {e}"
-                )
-                raise
-        else:  # self.overwrite is False
-            try:
-                logger.info(
-                    f"Overwrite is False. Attempting to create collection '{self.collection_name}' in scope '{self.scope_name}'."
-                )
-                await collection_manager.create_collection(
-                    scope_name=self.scope_name, collection_name=self.collection_name
-                )
-                logger.info(f"Successfully created new collection '{self.collection_name}'.")
-            except CollectionAlreadyExistsException:
-                logger.info(
-                    f"Collection '{self.collection_name}' already exists in scope '{self.scope_name}'. Using existing collection."
-                )
-            except Exception as e:
-                logger.error(f"Error creating collection '{self.collection_name}': {e}")
-                raise
-
-    async def _get_async_search_indexes_mng(self) -> Union[AsyncSearchIndexManager, AsyncScopeSearchIndexManager]:
-        """Get the async search indexes manager."""
-        if self.is_global_level_index:
-            cluster = await self.get_async_cluster()
-            return cluster.search_indexes()
-        else:
-            scope = await self.get_async_scope()
-            return scope.search_indexes()
-
-    async def _async_create_fts_index(self):
-        """Create a FTS index on the collection if it doesn't exist."""
-        async_search_mng = await self._get_async_search_indexes_mng()
-        try:
-            # Check if index exists and handle string index name
-            await async_search_mng.get_index(self.search_index_name)
-            if not self.overwrite:
-                return
-        except Exception:
-            if self.search_index_definition is None:
-                raise ValueError(f"Index '{self.search_index_name}' does not exist")
-
-        # Create or update index
-        try:
-            if self.overwrite:
-                try:
-                    logger.info(f"Dropping existing FTS index '{self.search_index_name}'")
-                    await async_search_mng.drop_index(self.search_index_name)
-                except SearchIndexNotFoundException:
-                    logger.warning(f"Index '{self.search_index_name}' does not exist")
-                except Exception as e:
-                    logger.warning(f"Error dropping index (may not exist): {e}")
-
-            await async_search_mng.upsert_index(self.search_index_definition)
-            logger.info(f"Created FTS index '{self.search_index_name}'")
-
-            if self.wait_until_index_ready:
-                await self._async_wait_for_index_ready()
-
-        except Exception as e:
-            logger.error(f"Error creating FTS index '{self.search_index_name}': {e}")
-            raise
-
-    async def _async_wait_for_index_ready(self):
-        """Wait until the FTS index is ready."""
-        start_time = time.time()
-        async_search_mng = await self._get_async_search_indexes_mng()
-        while True:
-            try:
-                count = await async_search_mng.get_indexed_documents_count(self.search_index_name)
-                if count > -1:
-                    logger.info(f"FTS index '{self.search_index_name}' is ready")
-                    break
-                # logger.info(f"FTS index '{self.search_index_name}' is not ready yet status: {index['status']}")
-            except Exception as e:
-                if time.time() - start_time > self.wait_until_index_ready:
-                    logger.error(f"Error checking index status: {e}")
-                    raise TimeoutError("Timeout waiting for FTS index to become ready")
-                await asyncio.sleep(1)
-
-    async def async_id_exists(self, id: str) -> bool:
-        try:
-            async_collection_instance = await self.get_async_collection()
-            result = await async_collection_instance.exists(id)
-            if not result.exists:
-                logger.debug(f"[async] Document does not exist: {id}")
-            return result.exists
-        except Exception as e:
-            logger.error(f"[async] Error checking document existence: {e}")
-            return False
-
-    async def async_name_exists(self, name: str) -> bool:
-        try:
-            query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
-            async_scope_instance = await self.get_async_scope()
-            result = async_scope_instance.query(
-                query, QueryOptions(named_parameters={"name": name}, scan_consistency=QueryScanConsistency.REQUEST_PLUS)
-            )
-            async for row in result.rows():
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"[async] Error checking document name existence: {e}")
-            return False
-
-    async def async_insert(
-        self, content_hash: str, documents: List[Document], filters: Optional[Dict[str, Any]] = None
-    ) -> None:
-        logger.info(f"[async] Inserting {len(documents)} documents")
-
-        async_collection_instance = await self.get_async_collection()
-        all_docs_to_insert: Dict[str, Any] = {}
-
-        if self.embedder.enable_batch and hasattr(self.embedder, "async_get_embeddings_batch_and_usage"):
-            # Use batch embedding when enabled and supported
-            try:
-                # Extract content from all documents
-                doc_contents = [doc.content for doc in documents]
-
-                # Get batch embeddings and usage
-                embeddings, usages = await self.embedder.async_get_embeddings_batch_and_usage(doc_contents)
-
-                # Process documents with pre-computed embeddings
-                for j, doc in enumerate(documents):
-                    try:
-                        if j < len(embeddings):
-                            doc.embedding = embeddings[j]
-                            doc.usage = usages[j] if j < len(usages) else None
-                    except Exception as e:
-                        logger.error(f"Error assigning batch embedding to document '{doc.name}': {e}")
-
-            except Exception as e:
-                # Check if this is a rate limit error - don't fall back as it would make things worse
-                error_str = str(e).lower()
-                is_rate_limit = any(
-                    phrase in error_str
-                    for phrase in ["rate limit", "too many requests", "429", "trial key", "api calls / minute"]
-                )
-
-                if is_rate_limit:
-                    logger.error(f"Rate limit detected during batch embedding. {e}")
-                    raise e
-                else:
-                    logger.warning(f"Async batch embedding failed, falling back to individual embeddings: {e}")
-                    # Fall back to individual embedding
-                    embed_tasks = [doc.async_embed(embedder=self.embedder) for doc in documents]
-                    await asyncio.gather(*embed_tasks, return_exceptions=True)
-        else:
-            # Use individual embedding
-            embed_tasks = [document.async_embed(embedder=self.embedder) for document in documents]
-            await asyncio.gather(*embed_tasks, return_exceptions=True)
-
-        for document in documents:
-            try:
-                # User edit: self.prepare_doc is no longer awaited with to_thread
-                doc_data = self.prepare_doc(content_hash, document)
-                if filters:
-                    doc_data["filters"] = filters
-                doc_id = doc_data.pop("_id")  # Remove _id as it's used as key
-                all_docs_to_insert[doc_id] = doc_data
-            except Exception as e:
-                logger.error(f"[async] Error preparing document '{document.name}': {e}")
-
-        if not all_docs_to_insert:
-            logger.info("[async] No documents prepared for insertion.")
-            return
-
-        doc_ids = list(all_docs_to_insert.keys())
-        total_inserted_count = 0
-        total_failed_count = 0
-        processed_doc_count = len(all_docs_to_insert)
-
-        for i in range(0, len(doc_ids), self.batch_limit):
-            batch_doc_ids = doc_ids[i : i + self.batch_limit]
-
-            logger.info(f"[async] Processing batch of {len(batch_doc_ids)} documents for concurrent insertion.")
-
-            insert_tasks = []
-            for doc_id in batch_doc_ids:
-                doc_content = all_docs_to_insert[doc_id]
-                insert_tasks.append(async_collection_instance.insert(doc_id, doc_content))
-
-            if insert_tasks:
-                results = await asyncio.gather(*insert_tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    # Get the original doc_id for logging, corresponding to the task order
-                    current_doc_id = batch_doc_ids[idx]
-                    if isinstance(result, Exception):
-                        total_failed_count += 1
-                        logger.error(f"[async] Error inserting document '{current_doc_id}': {result}")
-                    else:
-                        # Assuming successful insert doesn't return a specific value we need to check further,
-                        # or if it does, the absence of an exception means success.
-                        total_inserted_count += 1
-                        logger.debug(f"[async] Successfully inserted document '{current_doc_id}'.")
-
-        logger.info(f"[async] Finished processing {processed_doc_count} documents.")
-        logger.info(f"[async] Total successfully inserted: {total_inserted_count}, Total failed: {total_failed_count}.")
-
-    async def async_upsert(
-        self, content_hash: str, documents: List[Document], filters: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Upsert documents asynchronously."""
-        if self.content_hash_exists(content_hash):
-            self._delete_by_content_hash(content_hash)
-        await self._async_upsert(content_hash=content_hash, documents=documents, filters=filters)
-
-    async def _async_upsert(
-        self, content_hash: str, documents: List[Document], filters: Optional[Dict[str, Any]] = None
-    ) -> None:
-        logger.info(f"[async] Upserting {len(documents)} documents")
-
-        async_collection_instance = await self.get_async_collection()
-        all_docs_to_upsert: Dict[str, Any] = {}
-
-        if self.embedder.enable_batch and hasattr(self.embedder, "async_get_embeddings_batch_and_usage"):
-            # Use batch embedding when enabled and supported
-            try:
-                # Extract content from all documents
-                doc_contents = [doc.content for doc in documents]
-
-                # Get batch embeddings and usage
-                embeddings, usages = await self.embedder.async_get_embeddings_batch_and_usage(doc_contents)
-
-                # Process documents with pre-computed embeddings
-                for j, doc in enumerate(documents):
-                    try:
-                        if j < len(embeddings):
-                            doc.embedding = embeddings[j]
-                            doc.usage = usages[j] if j < len(usages) else None
-                    except Exception as e:
-                        logger.error(f"Error assigning batch embedding to document '{doc.name}': {e}")
-
-            except Exception as e:
-                # Check if this is a rate limit error - don't fall back as it would make things worse
-                error_str = str(e).lower()
-                is_rate_limit = any(
-                    phrase in error_str
-                    for phrase in ["rate limit", "too many requests", "429", "trial key", "api calls / minute"]
-                )
-
-                if is_rate_limit:
-                    logger.error(f"Rate limit detected during batch embedding. {e}")
-                    raise e
-                else:
-                    logger.warning(f"Async batch embedding failed, falling back to individual embeddings: {e}")
-                    # Fall back to individual embedding
-                    embed_tasks = [doc.async_embed(embedder=self.embedder) for doc in documents]
-                    await asyncio.gather(*embed_tasks, return_exceptions=True)
-        else:
-            # Use individual embedding
-            embed_tasks = [document.async_embed(embedder=self.embedder) for document in documents]
-            await asyncio.gather(*embed_tasks, return_exceptions=True)
-
-        for document in documents:
-            try:
-                # Consistent with async_insert, prepare_doc is not awaited with to_thread based on prior user edits
-                doc_data = self.prepare_doc(content_hash, document)
-                if filters:
-                    doc_data["filters"] = filters
-                doc_id = doc_data.pop("_id")  # _id is used as key for upsert
-                all_docs_to_upsert[doc_id] = doc_data
-            except Exception as e:
-                logger.error(f"[async] Error preparing document '{document.name}' for upsert: {e}")
-
-        if not all_docs_to_upsert:
-            logger.info("[async] No documents prepared for upsert.")
-            return
-
-        doc_ids = list(all_docs_to_upsert.keys())
-        total_upserted_count = 0
-        total_failed_count = 0
-        processed_doc_count = len(all_docs_to_upsert)
-
-        logger.info(f"[async] Prepared {processed_doc_count} documents for upsert.")
-
-        for i in range(0, len(doc_ids), self.batch_limit):
-            batch_doc_ids = doc_ids[i : i + self.batch_limit]
-
-            logger.info(f"[async] Processing batch of {len(batch_doc_ids)} documents for concurrent upsert.")
-
-            upsert_tasks = []
-            for doc_id in batch_doc_ids:
-                doc_content = all_docs_to_upsert[doc_id]
-                upsert_tasks.append(async_collection_instance.upsert(doc_id, doc_content))
-
-            if upsert_tasks:
-                results = await asyncio.gather(*upsert_tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    current_doc_id = batch_doc_ids[idx]
-                    if isinstance(result, Exception):
-                        total_failed_count += 1
-                        logger.error(f"[async] Error upserting document '{current_doc_id}': {result}")
-                    else:
-                        # Assuming successful upsert doesn't return a specific value we need to check further,
-                        # or if it does, the absence of an exception means success.
-                        total_upserted_count += 1
-                        logger.debug(f"[async] Successfully upserted document '{current_doc_id}'.")
-
-        logger.info(f"[async] Finished processing {processed_doc_count} documents for upsert.")
-        logger.info(f"[async] Total successfully upserted: {total_upserted_count}, Total failed: {total_failed_count}.")
-
-    async def async_search(
-        self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
-    ) -> List[Document]:
-        query_embedding = self.embedder.get_embedding(query)
-        if query_embedding is None:
-            logger.error(f"[async] Failed to generate embedding for query: {query}")
-            return []
-        try:
-            # Implement vector search using Couchbase FTS
-            vector_search = VectorSearch.from_vector_query(
-                VectorQuery(field_name="embedding", vector=query_embedding, num_candidates=limit)
-            )
-            request = SearchRequest.create(vector_search)
-
-            # Prepare the options dictionary
-            options_dict = {"limit": limit, "fields": ["*"]}
-            if filters:
-                options_dict["raw"] = filters
-
-            search_args = {
-                "index": self.search_index_name,
-                "request": request,
-                "options": SearchOptions(**options_dict),  # Construct SearchOptions with the dictionary
-            }
-
-            if self.is_global_level_index:
-                async_cluster_instance = await self.get_async_cluster()
-                results = async_cluster_instance.search(**search_args)
-            else:
-                async_scope_instance = await self.get_async_scope()
-                results = async_scope_instance.search(**search_args)
-
-            return await self.__async_get_doc_from_kv(results)
-        except Exception as e:
-            logger.error(f"[async] Error during search: {e}")
-            raise
-
-    async def async_drop(self) -> None:
-        if await self.async_exists():
-            try:
-                async_bucket_instance = await self.get_async_bucket()
-                await async_bucket_instance.collections().drop_collection(
-                    collection_name=self.collection_name, scope_name=self.scope_name
-                )
-                logger.info(f"[async] Collection '{self.collection_name}' dropped successfully.")
-            except Exception as e:
-                logger.error(f"[async] Error dropping collection '{self.collection_name}': {e}")
-                raise
-
-    async def async_exists(self) -> bool:
-        try:
-            async_bucket_instance = await self.get_async_bucket()
-            scopes = await async_bucket_instance.collections().get_all_scopes()
-            for scope in scopes:
-                if scope.name == self.scope_name:
-                    for collection in scope.collections:
-                        if collection.name == self.collection_name:
-                            return True
-            return False
-        except Exception:
-            return False
-
-    async def __async_get_doc_from_kv(self, response: AsyncSearchIndex) -> List[Document]:
-        """
-        Convert search results to Document objects by fetching full documents from KV store concurrently.
-
-        Args:
-            response: SearchResult from Couchbase search query
-
-        Returns:
-            List of Document objects
-        """
-        documents: List[Document] = []
-        # Assuming search_hits map directly to the order of documents we want to fetch and reconstruct
-        search_hits_map = {doc.id: doc.score async for doc in response.rows()}
-        doc_ids_to_fetch = list(search_hits_map.keys())
-
-        if not doc_ids_to_fetch:
-            return documents
-
-        async_collection_instance = await self.get_async_collection()
-
-        # Process in batches
-        for i in range(0, len(doc_ids_to_fetch), self.batch_limit):
-            batch_doc_ids = doc_ids_to_fetch[i : i + self.batch_limit]
-            if not batch_doc_ids:
-                continue
-
-            logger.debug(f"[async] Fetching batch of {len(batch_doc_ids)} documents from KV.")
-            get_tasks = [async_collection_instance.get(doc_id) for doc_id in batch_doc_ids]
-
-            # Fetch documents from KV store concurrently for the current batch
-            results_from_kv_batch = await asyncio.gather(*get_tasks, return_exceptions=True)
-
-            for batch_idx, get_result in enumerate(results_from_kv_batch):
-                # Original doc_id corresponding to this result within the batch
-                doc_id = batch_doc_ids[batch_idx]
-                # score = search_hits_map[doc_id]  # Retrieve the original score
-
-                if isinstance(get_result, BaseException) or isinstance(get_result, Exception) or get_result is None:
-                    logger.warning(f"[async] Document {doc_id} not found or error fetching from KV store: {get_result}")
-                    continue
-
-                try:
-                    value = get_result.content_as[dict]
-                    if not isinstance(value, dict):
-                        logger.warning(
-                            f"[async] Document {doc_id} content from KV is not a dict: {type(value)}. Skipping."
-                        )
-                        continue
-
-                    documents.append(
-                        Document(
-                            id=doc_id,
-                            name=value.get("name"),
-                            content=value.get("content", ""),
-                            meta_data=value.get("meta_data", {}),
-                            embedding=value.get("embedding", []),
-                        )
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"[async] Error processing document {doc_id} from KV store: {e}. Value: {getattr(get_result, 'content_as', 'N/A')}"
-                    )
-                    continue
-
-        return documents
+    def get_supported_search_types(self) -> List[str]:
+        """Get the supported search types for this vector database."""
+        return []  # CouchbaseSearch doesn't use SearchType enum
 
     def delete_by_id(self, id: str) -> bool:
         """
@@ -1427,7 +707,776 @@ class CouchbaseSearch(VectorDb):
         except Exception as e:
             logger.error(f"Error updating metadata for content_id '{content_id}': {e}")
             raise
+ 
+    @abstractmethod
+    def create(self) -> None:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
+        raise NotImplementedError
+    
+    # === ASYNC SUPPORT USING acouchbase ===
 
-    def get_supported_search_types(self) -> List[str]:
-        """Get the supported search types for this vector database."""
-        return []  # CouchbaseSearch doesn't use SearchType enum
+    async def _create_async_cluster_instance(self) -> AsyncCluster:
+        """Helper method to create and connect an AsyncCluster instance."""
+        logger.debug("Creating and connecting new AsyncCluster instance.")
+        cluster = await AsyncCluster.connect(self.connection_string, self.cluster_options)
+        # AsyncCluster.connect ensures the cluster is ready upon successful await.
+        # No explicit wait_until_ready is needed here for AsyncCluster.
+        logger.info("AsyncCluster connected successfully.")
+        return cluster
+
+    async def get_async_cluster(self) -> AsyncCluster:
+        """Gets or creates the cached AsyncCluster instance."""
+        if self._async_cluster is None:
+            logger.debug("AsyncCluster instance not cached, creating new one.")
+            self._async_cluster = await self._create_async_cluster_instance()
+        return self._async_cluster
+
+    async def get_async_bucket(self) -> AsyncBucket:
+        """Gets or creates the cached AsyncBucket instance."""
+        if self._async_bucket is None:
+            logger.debug("AsyncBucket instance not cached, creating new one.")
+            cluster = await self.get_async_cluster()
+            self._async_bucket = cluster.bucket(self.bucket_name)
+        return self._async_bucket
+
+    async def get_async_scope(self) -> AsyncScope:
+        """Gets or creates the cached AsyncScope instance."""
+        if self._async_scope is None:
+            logger.debug("AsyncScope instance not cached, creating new one.")
+            bucket = await self.get_async_bucket()
+            self._async_scope = bucket.scope(self.scope_name)
+        return self._async_scope
+
+    async def get_async_collection(self) -> AsyncCollection:
+        """Gets or creates the cached AsyncCollection instance."""
+        if self._async_collection is None:
+            logger.debug("AsyncCollection instance not cached, creating new one.")
+            scope = await self.get_async_scope()
+            self._async_collection = scope.collection(self.collection_name)
+        return self._async_collection
+
+    async def _async_create_collection_and_scope(self):
+        """
+        Get or create the scope and collection within the bucket.
+
+        Uses EAFP principle: attempts to create scope/collection and handles
+        specific exceptions if they already exist or (for collections with overwrite=True)
+        if they are not found for dropping.
+
+        Raises:
+            Exception: If scope or collection creation/manipulation fails unexpectedly.
+        """
+        # 1. Ensure Scope Exists
+        async_bucket_instance = await self.get_async_bucket()
+        try:
+            await async_bucket_instance.collections().create_scope(self.scope_name)
+            logger.info(f"Created new scope '{self.scope_name}'")
+        except ScopeAlreadyExistsException:
+            logger.info(f"Scope '{self.scope_name}' already exists. Using existing scope.")
+        except Exception as e:
+            logger.error(f"Failed to create or ensure scope '{self.scope_name}' exists: {e}")
+            raise
+
+        collection_manager = async_bucket_instance.collections()
+
+        # 2. Handle Collection
+        if self.overwrite:
+            # Attempt to drop the collection first since overwrite is True
+            try:
+                logger.info(
+                    f"Overwrite is True. Attempting to drop collection '{self.collection_name}' in scope '{self.scope_name}'."
+                )
+                await collection_manager.drop_collection(
+                    collection_name=self.collection_name, scope_name=self.scope_name
+                )
+                logger.info(f"Successfully dropped collection '{self.collection_name}'.")
+                time.sleep(1)  # Brief wait after drop, as in original code
+            except CollectionNotFoundException:
+                logger.info(
+                    f"Collection '{self.collection_name}' not found in scope '{self.scope_name}'. No need to drop."
+                )
+            except Exception as e:
+                logger.error(f"Error dropping collection '{self.collection_name}' during overwrite: {e}")
+                raise
+
+            # Proceed to create the collection
+            try:
+                logger.info(f"Creating collection '{self.collection_name}' in scope '{self.scope_name}'.")
+                await collection_manager.create_collection(
+                    scope_name=self.scope_name, collection_name=self.collection_name
+                )
+                logger.info(
+                    f"Successfully created collection '{self.collection_name}' after drop attempt (overwrite=True)."
+                )
+            except CollectionAlreadyExistsException:
+                # This is an unexpected state if overwrite=True and drop was supposed to clear the way.
+                logger.error(
+                    f"Failed to create collection '{self.collection_name}' as it already exists, "
+                    f"even after drop attempt for overwrite. Overwrite operation may not have completed as intended."
+                )
+                raise  # Re-raise as the overwrite intent failed
+            except Exception as e:
+                logger.error(
+                    f"Error creating collection '{self.collection_name}' after drop attempt (overwrite=True): {e}"
+                )
+                raise
+        else:  # self.overwrite is False
+            try:
+                logger.info(
+                    f"Overwrite is False. Attempting to create collection '{self.collection_name}' in scope '{self.scope_name}'."
+                )
+                await collection_manager.create_collection(
+                    scope_name=self.scope_name, collection_name=self.collection_name
+                )
+                logger.info(f"Successfully created new collection '{self.collection_name}'.")
+            except CollectionAlreadyExistsException:
+                logger.info(
+                    f"Collection '{self.collection_name}' already exists in scope '{self.scope_name}'. Using existing collection."
+                )
+            except Exception as e:
+                logger.error(f"Error creating collection '{self.collection_name}': {e}")
+                raise
+
+    async def async_id_exists(self, id: str) -> bool:
+        try:
+            async_collection_instance = await self.get_async_collection()
+            result = await async_collection_instance.exists(id)
+            if not result.exists:
+                logger.debug(f"[async] Document does not exist: {id}")
+            return result.exists
+        except Exception as e:
+            logger.error(f"[async] Error checking document existence: {e}")
+            return False
+
+    async def async_name_exists(self, name: str) -> bool:
+        try:
+            query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
+            async_scope_instance = await self.get_async_scope()
+            result = async_scope_instance.query(
+                query, QueryOptions(named_parameters={"name": name}, scan_consistency=QueryScanConsistency.REQUEST_PLUS)
+            )
+            async for row in result.rows():
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[async] Error checking document name existence: {e}")
+            return False
+
+    async def async_insert(
+        self, content_hash: str, documents: List[Document], filters: Optional[Dict[str, Any]] = None
+    ) -> None:
+        logger.info(f"[async] Inserting {len(documents)} documents")
+
+        async_collection_instance = await self.get_async_collection()
+        all_docs_to_insert: Dict[str, Any] = {}
+
+        if self.embedder.enable_batch and hasattr(self.embedder, "async_get_embeddings_batch_and_usage"):
+            # Use batch embedding when enabled and supported
+            try:
+                # Extract content from all documents
+                doc_contents = [doc.content for doc in documents]
+
+                # Get batch embeddings and usage
+                embeddings, usages = await self.embedder.async_get_embeddings_batch_and_usage(doc_contents)
+
+                # Process documents with pre-computed embeddings
+                for j, doc in enumerate(documents):
+                    try:
+                        if j < len(embeddings):
+                            doc.embedding = embeddings[j]
+                            doc.usage = usages[j] if j < len(usages) else None
+                    except Exception as e:
+                        logger.error(f"Error assigning batch embedding to document '{doc.name}': {e}")
+
+            except Exception as e:
+                # Check if this is a rate limit error - don't fall back as it would make things worse
+                error_str = str(e).lower()
+                is_rate_limit = any(
+                    phrase in error_str
+                    for phrase in ["rate limit", "too many requests", "429", "trial key", "api calls / minute"]
+                )
+
+                if is_rate_limit:
+                    logger.error(f"Rate limit detected during batch embedding. {e}")
+                    raise e
+                else:
+                    logger.warning(f"Async batch embedding failed, falling back to individual embeddings: {e}")
+                    # Fall back to individual embedding
+                    embed_tasks = [doc.async_embed(embedder=self.embedder) for doc in documents]
+                    await asyncio.gather(*embed_tasks, return_exceptions=True)
+        else:
+            # Use individual embedding
+            embed_tasks = [document.async_embed(embedder=self.embedder) for document in documents]
+            await asyncio.gather(*embed_tasks, return_exceptions=True)
+
+        for document in documents:
+            try:
+                # User edit: self.prepare_doc is no longer awaited with to_thread
+                doc_data = self.prepare_doc(content_hash, document)
+                if filters:
+                    doc_data["filters"] = filters
+                doc_id = doc_data.pop("_id")  # Remove _id as it's used as key
+                all_docs_to_insert[doc_id] = doc_data
+            except Exception as e:
+                logger.error(f"[async] Error preparing document '{document.name}': {e}")
+
+        if not all_docs_to_insert:
+            logger.info("[async] No documents prepared for insertion.")
+            return
+
+        doc_ids = list(all_docs_to_insert.keys())
+        total_inserted_count = 0
+        total_failed_count = 0
+        processed_doc_count = len(all_docs_to_insert)
+
+        for i in range(0, len(doc_ids), self.batch_limit):
+            batch_doc_ids = doc_ids[i : i + self.batch_limit]
+
+            logger.info(f"[async] Processing batch of {len(batch_doc_ids)} documents for concurrent insertion.")
+
+            insert_tasks = []
+            for doc_id in batch_doc_ids:
+                doc_content = all_docs_to_insert[doc_id]
+                insert_tasks.append(async_collection_instance.insert(doc_id, doc_content))
+
+            if insert_tasks:
+                results = await asyncio.gather(*insert_tasks, return_exceptions=True)
+                for idx, result in enumerate(results):
+                    # Get the original doc_id for logging, corresponding to the task order
+                    current_doc_id = batch_doc_ids[idx]
+                    if isinstance(result, Exception):
+                        total_failed_count += 1
+                        logger.error(f"[async] Error inserting document '{current_doc_id}': {result}")
+                    else:
+                        # Assuming successful insert doesn't return a specific value we need to check further,
+                        # or if it does, the absence of an exception means success.
+                        total_inserted_count += 1
+                        logger.debug(f"[async] Successfully inserted document '{current_doc_id}'.")
+
+        logger.info(f"[async] Finished processing {processed_doc_count} documents.")
+        logger.info(f"[async] Total successfully inserted: {total_inserted_count}, Total failed: {total_failed_count}.")
+
+    async def async_upsert(
+        self, content_hash: str, documents: List[Document], filters: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Upsert documents asynchronously."""
+        if self.content_hash_exists(content_hash):
+            self._delete_by_content_hash(content_hash)
+        await self._async_upsert(content_hash=content_hash, documents=documents, filters=filters)
+
+    async def _async_upsert(
+        self, content_hash: str, documents: List[Document], filters: Optional[Dict[str, Any]] = None
+    ) -> None:
+        logger.info(f"[async] Upserting {len(documents)} documents")
+
+        async_collection_instance = await self.get_async_collection()
+        all_docs_to_upsert: Dict[str, Any] = {}
+
+        if self.embedder.enable_batch and hasattr(self.embedder, "async_get_embeddings_batch_and_usage"):
+            # Use batch embedding when enabled and supported
+            try:
+                # Extract content from all documents
+                doc_contents = [doc.content for doc in documents]
+
+                # Get batch embeddings and usage
+                embeddings, usages = await self.embedder.async_get_embeddings_batch_and_usage(doc_contents)
+
+                # Process documents with pre-computed embeddings
+                for j, doc in enumerate(documents):
+                    try:
+                        if j < len(embeddings):
+                            doc.embedding = embeddings[j]
+                            doc.usage = usages[j] if j < len(usages) else None
+                    except Exception as e:
+                        logger.error(f"Error assigning batch embedding to document '{doc.name}': {e}")
+
+            except Exception as e:
+                # Check if this is a rate limit error - don't fall back as it would make things worse
+                error_str = str(e).lower()
+                is_rate_limit = any(
+                    phrase in error_str
+                    for phrase in ["rate limit", "too many requests", "429", "trial key", "api calls / minute"]
+                )
+
+                if is_rate_limit:
+                    logger.error(f"Rate limit detected during batch embedding. {e}")
+                    raise e
+                else:
+                    logger.warning(f"Async batch embedding failed, falling back to individual embeddings: {e}")
+                    # Fall back to individual embedding
+                    embed_tasks = [doc.async_embed(embedder=self.embedder) for doc in documents]
+                    await asyncio.gather(*embed_tasks, return_exceptions=True)
+        else:
+            # Use individual embedding
+            embed_tasks = [document.async_embed(embedder=self.embedder) for document in documents]
+            await asyncio.gather(*embed_tasks, return_exceptions=True)
+
+        for document in documents:
+            try:
+                # Consistent with async_insert, prepare_doc is not awaited with to_thread based on prior user edits
+                doc_data = self.prepare_doc(content_hash, document)
+                if filters:
+                    doc_data["filters"] = filters
+                doc_id = doc_data.pop("_id")  # _id is used as key for upsert
+                all_docs_to_upsert[doc_id] = doc_data
+            except Exception as e:
+                logger.error(f"[async] Error preparing document '{document.name}' for upsert: {e}")
+
+        if not all_docs_to_upsert:
+            logger.info("[async] No documents prepared for upsert.")
+            return
+
+        doc_ids = list(all_docs_to_upsert.keys())
+        total_upserted_count = 0
+        total_failed_count = 0
+        processed_doc_count = len(all_docs_to_upsert)
+
+        logger.info(f"[async] Prepared {processed_doc_count} documents for upsert.")
+
+        for i in range(0, len(doc_ids), self.batch_limit):
+            batch_doc_ids = doc_ids[i : i + self.batch_limit]
+
+            logger.info(f"[async] Processing batch of {len(batch_doc_ids)} documents for concurrent upsert.")
+
+            upsert_tasks = []
+            for doc_id in batch_doc_ids:
+                doc_content = all_docs_to_upsert[doc_id]
+                upsert_tasks.append(async_collection_instance.upsert(doc_id, doc_content))
+
+            if upsert_tasks:
+                results = await asyncio.gather(*upsert_tasks, return_exceptions=True)
+                for idx, result in enumerate(results):
+                    current_doc_id = batch_doc_ids[idx]
+                    if isinstance(result, Exception):
+                        total_failed_count += 1
+                        logger.error(f"[async] Error upserting document '{current_doc_id}': {result}")
+                    else:
+                        # Assuming successful upsert doesn't return a specific value we need to check further,
+                        # or if it does, the absence of an exception means success.
+                        total_upserted_count += 1
+                        logger.debug(f"[async] Successfully upserted document '{current_doc_id}'.")
+
+        logger.info(f"[async] Finished processing {processed_doc_count} documents for upsert.")
+        logger.info(f"[async] Total successfully upserted: {total_upserted_count}, Total failed: {total_failed_count}.")
+
+    async def async_drop(self) -> None:
+        if await self.async_exists():
+            try:
+                async_bucket_instance = await self.get_async_bucket()
+                await async_bucket_instance.collections().drop_collection(
+                    collection_name=self.collection_name, scope_name=self.scope_name
+                )
+                logger.info(f"[async] Collection '{self.collection_name}' dropped successfully.")
+            except Exception as e:
+                logger.error(f"[async] Error dropping collection '{self.collection_name}': {e}")
+                raise
+
+    async def async_exists(self) -> bool:
+        try:
+            async_bucket_instance = await self.get_async_bucket()
+            scopes = await async_bucket_instance.collections().get_all_scopes()
+            for scope in scopes:
+                if scope.name == self.scope_name:
+                    for collection in scope.collections:
+                        if collection.name == self.collection_name:
+                            return True
+            return False
+        except Exception:
+            return False
+
+    @abstractmethod
+    async def async_search(
+        self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Document]:
+        raise NotImplementedError
+    
+    @abstractmethod
+    async def async_create(self) -> None:
+        raise NotImplementedError
+    
+class CouchbaseSearch(CouchbaseUtils):
+    """
+    Couchbase Vector Database implementation with FTS (Full Text Search) index support.
+    """
+
+    def __init__(   
+        self,
+        bucket_name: str,
+        scope_name: str,
+        collection_name: str,
+        couchbase_connection_string: str,
+        cluster_options: ClusterOptions,
+        search_index: Union[str, SearchIndex],
+        embedder: Embedder = OpenAIEmbedder(),
+        overwrite: bool = False,
+        is_global_level_index: bool = False,
+        wait_until_index_ready: float = 0,
+        batch_limit: int = 500,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        **kwargs,
+    ):
+        """
+        Initialize the CouchbaseSearch with Couchbase connection details.
+
+        Args:
+            bucket_name (str): Name of the Couchbase bucket.
+            scope_name (str): Name of the scope within the bucket.
+            collection_name (str): Name of the collection within the scope.
+            name (Optional[str]): Name of the vector database.
+            description (Optional[str]): Description of the vector database.
+            couchbase_connection_string (str): Couchbase connection string.
+            cluster_options (ClusterOptions): Options for configuring the Couchbase cluster connection.
+            search_index (Union[str, SearchIndex], optional): Search index configuration, either as index name or SearchIndex definition.
+            embedder (Embedder): Embedder instance for generating embeddings. Defaults to OpenAIEmbedder.
+            overwrite (bool): Whether to overwrite existing collection. Defaults to False.
+            wait_until_index_ready (float, optional): Time in seconds to wait until the index is ready. Defaults to 0.
+            batch_limit (int, optional): Maximum number of documents to process in a single batch (applies to both sync and async operations). Defaults to 500.
+            **kwargs: Additional arguments for Couchbase connection.
+        """
+        super().__init__(
+            bucket_name=bucket_name,
+            scope_name=scope_name,
+            collection_name=collection_name,
+            couchbase_connection_string=couchbase_connection_string,
+            cluster_options=cluster_options,
+            embedder=embedder,
+            overwrite=overwrite,
+            batch_limit=batch_limit,
+            name=name,
+            description=description,
+        )
+        self.is_global_level_index = is_global_level_index
+        self.wait_until_index_ready = wait_until_index_ready
+
+        self.kwargs = kwargs
+        if isinstance(search_index, str):
+            self.search_index_name = search_index
+            self.search_index_definition = None
+        else:
+            self.search_index_name = search_index.name
+            self.search_index_definition = search_index
+
+    def _search_indexes_mng(self) -> Union[SearchIndexManager, ScopeSearchIndexManager]:
+        """Get the search indexes manager."""
+        if self.is_global_level_index:
+            return self.cluster.search_indexes()
+        else:
+            return self.scope.search_indexes()
+
+    def _create_fts_index(self):
+        """Create a FTS index on the collection if it doesn't exist."""
+        try:
+            # Check if index exists and handle string index name
+            self._search_indexes_mng().get_index(self.search_index_name)
+            if not self.overwrite:
+                return
+        except Exception:
+            if self.search_index_definition is None:
+                raise ValueError(f"Index '{self.search_index_name}' does not exist")
+
+        # Create or update index
+        try:
+            if self.overwrite:
+                try:
+                    logger.info(f"Dropping existing FTS index '{self.search_index_name}'")
+                    self._search_indexes_mng().drop_index(self.search_index_name)
+                except SearchIndexNotFoundException:
+                    logger.warning(f"Index '{self.search_index_name}' does not exist")
+                except Exception as e:
+                    logger.warning(f"Error dropping index (may not exist): {e}")
+
+            self._search_indexes_mng().upsert_index(self.search_index_definition)
+            logger.info(f"Created FTS index '{self.search_index_name}'")
+
+            if self.wait_until_index_ready:
+                self._wait_for_index_ready()
+
+        except Exception as e:
+            logger.error(f"Error creating FTS index '{self.search_index_name}': {e}")
+            raise
+
+    def _wait_for_index_ready(self):
+        """Wait until the FTS index is ready."""
+        start_time = time.time()
+        while True:
+            try:
+                count = self._search_indexes_mng().get_indexed_documents_count(self.search_index_name)
+                if count > -1:
+                    logger.info(f"FTS index '{self.search_index_name}' is ready")
+                    break
+                # logger.info(f"FTS index '{self.search_index_name}' is not ready yet status: {index['status']}")
+            except Exception as e:
+                if time.time() - start_time > self.wait_until_index_ready:
+                    logger.error(f"Error checking index status: {e}")
+                    raise TimeoutError("Timeout waiting for FTS index to become ready")
+                time.sleep(1)
+
+    def create(self) -> None:
+        """Create the collection and FTS index if they don't exist."""
+        self._create_collection_and_scope()
+        self._create_fts_index()
+
+    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
+        """Search the Couchbase bucket for documents relevant to the query."""
+        query_embedding = self.embedder.get_embedding(query)
+        if query_embedding is None:
+            logger.error(f"Failed to generate embedding for query: {query}")
+            return []
+
+        try:
+            # Implement vector search using Couchbase FTS
+            vector_search = VectorSearch.from_vector_query(
+                VectorQuery(field_name="embedding", vector=query_embedding, num_candidates=limit)
+            )
+            request = SearchRequest.create(vector_search)
+
+            # Prepare the options dictionary
+            options_dict = {"limit": limit, "fields": ["*"]}
+            if filters:
+                options_dict["raw"] = filters
+
+            search_args = {
+                "index": self.search_index_name,
+                "request": request,
+                "options": SearchOptions(**options_dict),  # Construct SearchOptions with the dictionary
+            }
+
+            if self.is_global_level_index:
+                results = self.cluster.search(**search_args)
+            else:
+                results = self.scope.search(**search_args)
+
+            return self.__get_doc_from_kv(results)
+        except Exception as e:
+            logger.error(f"Error during search: {e}")
+            raise
+
+    def __get_doc_from_kv(self, response: SearchResult) -> List[Document]:
+        """
+        Convert search results to Document objects by fetching full documents from KV store.
+
+        Args:
+            response: SearchResult from Couchbase search query
+
+        Returns:
+            List of Document objects
+        """
+        documents: List[Document] = []
+        search_hits = [(doc.id, doc.score) for doc in response.rows()]
+
+        if not search_hits:
+            return documents
+
+        # Fetch documents from KV store
+        ids = [hit[0] for hit in search_hits]
+        kv_response = self.collection.get_multi(keys=ids)
+
+        if not kv_response.all_ok:
+            raise Exception(f"Failed to get documents from KV store: {kv_response.exceptions}")
+
+        # Convert results to Documents
+        for doc_id, score in search_hits:
+            get_result = kv_response.results.get(doc_id)
+            if get_result is None or not get_result.success:
+                logger.warning(f"Document {doc_id} not found in KV store")
+                continue
+
+            value = get_result.value
+            documents.append(
+                Document(
+                    id=doc_id,
+                    name=value["name"],
+                    content=value["content"],
+                    meta_data=value["meta_data"],
+                    embedding=value["embedding"],
+                    content_id=value.get("content_id"),
+                )
+            )
+
+        return documents
+
+    def get_count(self) -> int:
+        """Get the count of documents in the Couchbase bucket."""
+        try:
+            search_indexes = self.cluster.search_indexes()
+            if not self.is_global_level_index:
+                search_indexes = self.scope.search_indexes()
+            return search_indexes.get_indexed_documents_count(self.search_index_name)
+        except Exception as e:
+            logger.error(f"Error getting document count: {e}")
+            return 0
+
+    # === ASYNC SUPPORT USING acouchbase ===
+
+    async def async_create(self) -> None:
+        # FTS index creation is not supported in acouchbase as of now, so fallback to sync for index creation
+        # This is a limitation of the SDK. You may want to document this.
+        await self._async_create_collection_and_scope()
+        await self._async_create_fts_index()
+
+    async def _get_async_search_indexes_mng(self) -> Union[AsyncSearchIndexManager, AsyncScopeSearchIndexManager]:
+        """Get the async search indexes manager."""
+        if self.is_global_level_index:
+            cluster = await self.get_async_cluster()
+            return cluster.search_indexes()
+        else:
+            scope = await self.get_async_scope()
+            return scope.search_indexes()
+
+    async def _async_create_fts_index(self):
+        """Create a FTS index on the collection if it doesn't exist."""
+        async_search_mng = await self._get_async_search_indexes_mng()
+        try:
+            # Check if index exists and handle string index name
+            await async_search_mng.get_index(self.search_index_name)
+            if not self.overwrite:
+                return
+        except Exception:
+            if self.search_index_definition is None:
+                raise ValueError(f"Index '{self.search_index_name}' does not exist")
+
+        # Create or update index
+        try:
+            if self.overwrite:
+                try:
+                    logger.info(f"Dropping existing FTS index '{self.search_index_name}'")
+                    await async_search_mng.drop_index(self.search_index_name)
+                except SearchIndexNotFoundException:
+                    logger.warning(f"Index '{self.search_index_name}' does not exist")
+                except Exception as e:
+                    logger.warning(f"Error dropping index (may not exist): {e}")
+
+            await async_search_mng.upsert_index(self.search_index_definition)
+            logger.info(f"Created FTS index '{self.search_index_name}'")
+
+            if self.wait_until_index_ready:
+                await self._async_wait_for_index_ready()
+
+        except Exception as e:
+            logger.error(f"Error creating FTS index '{self.search_index_name}': {e}")
+            raise
+
+    async def _async_wait_for_index_ready(self):
+        """Wait until the FTS index is ready."""
+        start_time = time.time()
+        async_search_mng = await self._get_async_search_indexes_mng()
+        while True:
+            try:
+                count = await async_search_mng.get_indexed_documents_count(self.search_index_name)
+                if count > -1:
+                    logger.info(f"FTS index '{self.search_index_name}' is ready")
+                    break
+                # logger.info(f"FTS index '{self.search_index_name}' is not ready yet status: {index['status']}")
+            except Exception as e:
+                if time.time() - start_time > self.wait_until_index_ready:
+                    logger.error(f"Error checking index status: {e}")
+                    raise TimeoutError("Timeout waiting for FTS index to become ready")
+                await asyncio.sleep(1)
+
+    async def async_search(
+        self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Document]:
+        query_embedding = self.embedder.get_embedding(query)
+        if query_embedding is None:
+            logger.error(f"[async] Failed to generate embedding for query: {query}")
+            return []
+        try:
+            # Implement vector search using Couchbase FTS
+            vector_search = VectorSearch.from_vector_query(
+                VectorQuery(field_name="embedding", vector=query_embedding, num_candidates=limit)
+            )
+            request = SearchRequest.create(vector_search)
+
+            # Prepare the options dictionary
+            options_dict = {"limit": limit, "fields": ["*"]}
+            if filters:
+                options_dict["raw"] = filters
+
+            search_args = {
+                "index": self.search_index_name,
+                "request": request,
+                "options": SearchOptions(**options_dict),  # Construct SearchOptions with the dictionary
+            }
+
+            if self.is_global_level_index:
+                async_cluster_instance = await self.get_async_cluster()
+                results = async_cluster_instance.search(**search_args)
+            else:
+                async_scope_instance = await self.get_async_scope()
+                results = async_scope_instance.search(**search_args)
+
+            return await self.__async_get_doc_from_kv(results)
+        except Exception as e:
+            logger.error(f"[async] Error during search: {e}")
+            raise
+
+    async def __async_get_doc_from_kv(self, response: AsyncSearchIndex) -> List[Document]:
+        """
+        Convert search results to Document objects by fetching full documents from KV store concurrently.
+
+        Args:
+            response: SearchResult from Couchbase search query
+
+        Returns:
+            List of Document objects
+        """
+        documents: List[Document] = []
+        # Assuming search_hits map directly to the order of documents we want to fetch and reconstruct
+        search_hits_map = {doc.id: doc.score async for doc in response.rows()}
+        doc_ids_to_fetch = list(search_hits_map.keys())
+
+        if not doc_ids_to_fetch:
+            return documents
+
+        async_collection_instance = await self.get_async_collection()
+
+        # Process in batches
+        for i in range(0, len(doc_ids_to_fetch), self.batch_limit):
+            batch_doc_ids = doc_ids_to_fetch[i : i + self.batch_limit]
+            if not batch_doc_ids:
+                continue
+
+            logger.debug(f"[async] Fetching batch of {len(batch_doc_ids)} documents from KV.")
+            get_tasks = [async_collection_instance.get(doc_id) for doc_id in batch_doc_ids]
+
+            # Fetch documents from KV store concurrently for the current batch
+            results_from_kv_batch = await asyncio.gather(*get_tasks, return_exceptions=True)
+
+            for batch_idx, get_result in enumerate(results_from_kv_batch):
+                # Original doc_id corresponding to this result within the batch
+                doc_id = batch_doc_ids[batch_idx]
+                # score = search_hits_map[doc_id]  # Retrieve the original score
+
+                if isinstance(get_result, BaseException) or isinstance(get_result, Exception) or get_result is None:
+                    logger.warning(f"[async] Document {doc_id} not found or error fetching from KV store: {get_result}")
+                    continue
+
+                try:
+                    value = get_result.content_as[dict]
+                    if not isinstance(value, dict):
+                        logger.warning(
+                            f"[async] Document {doc_id} content from KV is not a dict: {type(value)}. Skipping."
+                        )
+                        continue
+
+                    documents.append(
+                        Document(
+                            id=doc_id,
+                            name=value.get("name"),
+                            content=value.get("content", ""),
+                            meta_data=value.get("meta_data", {}),
+                            embedding=value.get("embedding", []),
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[async] Error processing document {doc_id} from KV store: {e}. Value: {getattr(get_result, 'content_as', 'N/A')}"
+                    )
+                    continue
+
+        return documents
+

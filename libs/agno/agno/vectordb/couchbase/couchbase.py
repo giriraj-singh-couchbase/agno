@@ -1,5 +1,6 @@
 from abc import abstractmethod
 import asyncio
+from enum import Enum
 import time
 from datetime import timedelta
 from typing import Any, Dict, List, Optional, Union
@@ -1480,3 +1481,150 @@ class CouchbaseSearch(CouchbaseUtils):
 
         return documents
 
+class QueryVectorSearchType(str, Enum):
+    """Enum for search types supported by Couchbase GSI."""
+
+    ANN = "ANN"
+    KNN = "KNN"
+
+
+class QueryVectorSearchSimilarity(str, Enum):
+    """Enum for similarity metrics supported by Couchbase GSI."""
+
+    COSINE = "COSINE"
+    DOT = "DOT"
+    L2 = "L2"
+    EUCLIDEAN = "EUCLIDEAN"
+    L2_SQUARED = "L2_SQUARED"
+    EUCLIDEAN_SQUARED = "EUCLIDEAN_SQUARED"
+
+
+class CouchbaseQuery(CouchbaseUtils):
+    def __init__(self,
+
+        bucket_name: str,
+        scope_name: str,
+        collection_name: str,
+        couchbase_connection_string: str,
+        search_type: Union[QueryVectorSearchType, str],
+        similarity: Union[QueryVectorSearchSimilarity, str],
+        n_probes: Optional[int],
+        cluster_options: ClusterOptions,
+        embedder: Embedder = OpenAIEmbedder(),
+        embedding_key: str = "embedding",
+        overwrite: bool = False,
+        batch_limit: int = 500,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        **kwargs,
+    ):
+        super().__init__(
+            bucket_name=bucket_name,
+            scope_name=scope_name,
+            collection_name=collection_name,
+            couchbase_connection_string=couchbase_connection_string,
+            cluster_options=cluster_options,
+            embedder=embedder,
+            overwrite=overwrite,
+            batch_limit=batch_limit,
+            name=name,
+            description=description,
+        )
+        if isinstance(search_type, str):
+            self._search_type = QueryVectorSearchType(search_type)
+        else:
+            self._search_type = search_type
+        self._similarity = (
+            similarity.upper()
+            if isinstance(similarity, str)
+            else (
+                similarity.value
+                if isinstance(similarity, QueryVectorSearchSimilarity)
+                else None
+            )
+        )
+        self._nprobes = n_probes
+        self._embedding_key = embedding_key
+    
+    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
+        query_embedding = self.embedder.get_embedding(query)
+        if query_embedding is None:
+            logger.error(f"Failed to generate embedding for query: {query}")
+            return []
+        
+        query_context = (
+            f"`{self.bucket_name}`.`{self.scope_name}`.`{self.collection_name}`"
+        )
+        
+        # Convert embedding to string representation for query
+        query_vector_str = str(query_embedding)
+        
+        # Select all document fields plus the document ID
+        fields = "d.*, META(d).id as id"
+        
+        nprobes = self._nprobes
+        
+        # Determine the appropriate distance function based on search type
+        if self._search_type == QueryVectorSearchType.ANN:
+            nprobes_exp = f", {nprobes}" if nprobes else ""
+            distance_function_exp = f"APPROX_VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}'{nprobes_exp})"
+        else:
+            distance_function_exp = f"VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}')"
+        
+        # Build the SQL++ query
+        query_str = f"""
+        SELECT {fields}, {distance_function_exp} as score
+        FROM {query_context} d
+        ORDER BY score
+        LIMIT {limit}
+        """
+        
+        try:
+            # Execute the query
+            result = self.cluster.query(query_str)
+            
+            documents: List[Document] = []
+            
+            # Process results
+            for row in result.rows():
+                doc_id = row.get("id", "")
+                name = row.get("name", "")
+                content = row.get("content", "")
+                meta_data = row.get("meta_data", {})
+                embedding = row.get(self._embedding_key, [])
+                content_id = row.get("content_id")
+                
+                documents.append(
+                    Document(
+                        id=doc_id,
+                        name=name,
+                        content=content,
+                        meta_data=meta_data,
+                        embedding=embedding,
+                        content_id=content_id,
+                    )
+                )
+            
+            return documents
+            
+        except Exception as e:
+            logger.error(f"Error during vector search: {e}")
+            raise
+    
+    def create(self) -> None:
+        """Create the collection and scope if they don't exist."""
+        self._create_collection_and_scope()
+        logger.info(f"CouchbaseQuery vector store created successfully for collection '{self.collection_name}'")
+    
+    async def async_search(
+        self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Document]:
+        """Async version of search - placeholder for future implementation."""
+        # For now, delegate to sync version
+        # TODO: Implement true async query execution when supported by SDK
+        return self.search(query, limit, filters)
+    
+    async def async_create(self) -> None:
+        """Async version of create."""
+        await self._async_create_collection_and_scope()
+        logger.info(f"[async] CouchbaseQuery vector store created successfully for collection '{self.collection_name}'")

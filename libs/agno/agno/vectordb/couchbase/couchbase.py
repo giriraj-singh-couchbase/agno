@@ -1619,10 +1619,82 @@ class CouchbaseQuery(CouchbaseUtils):
     async def async_search(
         self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
     ) -> List[Document]:
-        """Async version of search - placeholder for future implementation."""
-        # For now, delegate to sync version
-        # TODO: Implement true async query execution when supported by SDK
-        return self.search(query, limit, filters)
+        """Async version of search using async query execution."""
+        # Generate embedding asynchronously if the embedder supports it
+        if hasattr(self.embedder, 'async_get_embedding'):
+            query_embedding = await self.embedder.async_get_embedding(query)
+        else:
+            query_embedding = self.embedder.get_embedding(query)
+            
+        if query_embedding is None:
+            logger.error(f"[async] Failed to generate embedding for query: {query}")
+            return []
+        
+        query_context = (
+            f"`{self.bucket_name}`.`{self.scope_name}`.`{self.collection_name}`"
+        )
+        
+        # Convert embedding to string representation for query
+        query_vector_str = str(query_embedding)
+        
+        # Select all document fields plus the document ID
+        fields = "d.*, META(d).id as id"
+        
+        nprobes = self._nprobes
+        
+        # Determine the appropriate distance function based on search type
+        if self._search_type == QueryVectorSearchType.ANN:
+            nprobes_exp = f", {nprobes}" if nprobes else ""
+            distance_function_exp = f"APPROX_VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}'{nprobes_exp})"
+        else:
+            distance_function_exp = f"VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}')"
+        
+        # Build the SQL++ query
+        query_str = f"""
+        SELECT {fields}, {distance_function_exp} as score
+        FROM {query_context} d
+        ORDER BY score
+        LIMIT {limit}
+        """
+        
+        try:
+            # Execute the query using async cluster
+            async_cluster_instance = await self.get_async_cluster()
+            result = await async_cluster_instance.query(query_str)
+            
+            documents: List[Document] = []
+            
+            # Process results asynchronously
+            async for row in result.rows():
+                try:
+                    # Extract document fields
+                    doc_id = row.get("id")
+                    name = row.get("name", "")
+                    content = row.get("content", "")
+                    meta_data = row.get("meta_data", {})
+                    embedding = row.get("embedding", [])
+                    content_id = row.get("content_id")
+                    
+                    # Create Document object
+                    documents.append(
+                        Document(
+                            id=doc_id,
+                            name=name,
+                            content=content,
+                            meta_data=meta_data,
+                            embedding=embedding,
+                            content_id=content_id,
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"[async] Error processing search result row: {e}")
+                    continue
+            
+            return documents
+            
+        except Exception as e:
+            logger.error(f"[async] Error during vector search: {e}")
+            raise
     
     async def async_create(self) -> None:
         """Async version of create."""

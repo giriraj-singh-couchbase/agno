@@ -21,7 +21,13 @@ from couchbase.result import GetResult, MultiMutationResult
 from couchbase.scope import Scope
 
 from agno.knowledge.document import Document
-from agno.vectordb.couchbase.couchbase import CouchbaseSearch, OpenAIEmbedder
+from agno.vectordb.couchbase.couchbase import (
+    CouchbaseQuery,
+    CouchbaseSearch, 
+    OpenAIEmbedder,
+    QueryVectorSearchSimilarity,
+    QueryVectorSearchType,
+)
 
 
 @pytest.fixture
@@ -1391,3 +1397,476 @@ def test_delete_by_content_id_exception_handling(couchbase_fts, mock_scope):
     mock_scope.query.side_effect = Exception("Query error")
     result = couchbase_fts.delete_by_content_id("content_123")
     assert result is False
+
+
+# ===============================================
+# CouchbaseQuery Tests
+# ===============================================
+
+@pytest.fixture
+def couchbase_query_ann(mock_collection, mock_embedder):
+    """CouchbaseQuery fixture with ANN search type."""
+    query_db = CouchbaseQuery(
+        bucket_name="test_bucket",
+        scope_name="test_scope", 
+        collection_name="test_collection",
+        couchbase_connection_string="couchbase://localhost",
+        search_type=QueryVectorSearchType.ANN,
+        similarity=QueryVectorSearchSimilarity.COSINE,
+        n_probes=10,
+        cluster_options=ClusterOptions(
+            authenticator=PasswordAuthenticator("username", "password"),
+        ),
+        embedder=mock_embedder,
+        embedding_key="embedding",
+    )
+    return query_db
+
+
+@pytest.fixture
+def couchbase_query_knn(mock_collection, mock_embedder):
+    """CouchbaseQuery fixture with KNN search type."""
+    query_db = CouchbaseQuery(
+        bucket_name="test_bucket",
+        scope_name="test_scope",
+        collection_name="test_collection", 
+        couchbase_connection_string="couchbase://localhost",
+        search_type="KNN",  # Test string initialization
+        similarity="DOT",   # Test string initialization
+        n_probes=None,
+        cluster_options=ClusterOptions(
+            authenticator=PasswordAuthenticator("username", "password"),
+        ),
+        embedder=mock_embedder,
+    )
+    return query_db
+
+
+def test_couchbase_query_init_with_enums(couchbase_query_ann):
+    """Test CouchbaseQuery initialization with enum types."""
+    assert couchbase_query_ann.bucket_name == "test_bucket"
+    assert couchbase_query_ann.scope_name == "test_scope" 
+    assert couchbase_query_ann.collection_name == "test_collection"
+    assert couchbase_query_ann._search_type == QueryVectorSearchType.ANN
+    assert couchbase_query_ann._similarity == "COSINE"
+    assert couchbase_query_ann._nprobes == 10
+    assert couchbase_query_ann._embedding_key == "embedding"
+
+
+def test_couchbase_query_init_with_strings(couchbase_query_knn):
+    """Test CouchbaseQuery initialization with string types."""
+    assert couchbase_query_knn._search_type == QueryVectorSearchType.KNN
+    assert couchbase_query_knn._similarity == "DOT"
+    assert couchbase_query_knn._nprobes is None
+    assert couchbase_query_knn._embedding_key == "embedding"
+
+
+def test_couchbase_query_create(couchbase_query_ann, mock_bucket):
+    """Test CouchbaseQuery create method."""
+    # Mock the collections manager
+    collections_manager = Mock()
+    mock_bucket.collections.return_value = collections_manager
+    
+    # Call create method
+    couchbase_query_ann.create()
+    
+    # Verify that _create_collection_and_scope was called
+    collections_manager.create_scope.assert_called_once_with(scope_name="test_scope")
+
+
+def test_couchbase_query_search_ann(couchbase_query_ann, mock_cluster, mock_embedder):
+    """Test CouchbaseQuery search with ANN search type."""
+    # Setup mock embedder
+    mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
+    
+    # Setup mock query result
+    mock_result = Mock()
+    mock_row = Mock()
+    mock_row.get.side_effect = lambda key: {
+        "id": "test_id_1",
+        "name": "test doc 1", 
+        "content": "test content 1",
+        "meta_data": {"category": "test"},
+        "embedding": [0.1, 0.2, 0.3, 0.4, 0.5],
+        "content_id": "content_123",
+    }[key]
+    mock_result.rows.return_value = [mock_row]
+    mock_cluster.query.return_value = mock_result
+    
+    # Perform search
+    results = couchbase_query_ann.search("test query", limit=5)
+    
+    # Verify embedder was called
+    mock_embedder.get_embedding.assert_called_once_with("test query")
+    
+    # Verify cluster query was called with correct SQL
+    mock_cluster.query.assert_called_once()
+    query_sql = mock_cluster.query.call_args[0][0]
+    assert "APPROX_VECTOR_DISTANCE" in query_sql
+    assert "COSINE" in query_sql
+    assert ", 10" in query_sql  # n_probes
+    assert "LIMIT 5" in query_sql
+    assert "`test_bucket`.`test_scope`.`test_collection`" in query_sql
+    
+    # Verify results
+    assert len(results) == 1
+    assert isinstance(results[0], Document)
+    assert results[0].id == "test_id_1"
+    assert results[0].name == "test doc 1"
+    assert results[0].content == "test content 1"
+
+
+def test_couchbase_query_search_knn(couchbase_query_knn, mock_cluster, mock_embedder):
+    """Test CouchbaseQuery search with KNN search type."""
+    # Setup mock embedder
+    mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
+    
+    # Setup mock query result
+    mock_result = Mock()
+    mock_row = Mock()
+    mock_row.get.side_effect = lambda key: {
+        "id": "test_id_2",
+        "name": "test doc 2",
+        "content": "test content 2", 
+        "meta_data": {"priority": "high"},
+        "embedding": [0.2, 0.3, 0.4, 0.5, 0.6],
+        "content_id": "content_456",
+    }[key]
+    mock_result.rows.return_value = [mock_row]
+    mock_cluster.query.return_value = mock_result
+    
+    # Perform search  
+    results = couchbase_query_knn.search("test query", limit=3)
+    
+    # Verify cluster query was called with correct SQL
+    query_sql = mock_cluster.query.call_args[0][0]
+    assert "VECTOR_DISTANCE" in query_sql  # Not APPROX_VECTOR_DISTANCE
+    assert "DOT" in query_sql
+    assert ", 10" not in query_sql  # No n_probes for KNN
+    assert "LIMIT 3" in query_sql
+    
+    # Verify results
+    assert len(results) == 1
+    assert results[0].id == "test_id_2"
+    assert results[0].name == "test doc 2"
+
+
+def test_couchbase_query_search_no_embedding(couchbase_query_ann, mock_embedder):
+    """Test CouchbaseQuery search when embedding generation fails."""
+    # Setup mock embedder to return None
+    mock_embedder.get_embedding.return_value = None
+    
+    # Perform search
+    results = couchbase_query_ann.search("test query", limit=5)
+    
+    # Should return empty list
+    assert results == []
+
+
+def test_couchbase_query_search_exception(couchbase_query_ann, mock_cluster, mock_embedder):
+    """Test CouchbaseQuery search exception handling."""
+    # Setup mock embedder
+    mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
+    
+    # Setup mock cluster to raise exception
+    mock_cluster.query.side_effect = Exception("Query execution failed")
+    
+    # Test that exception is propagated
+    with pytest.raises(Exception, match="Query execution failed"):
+        couchbase_query_ann.search("test query", limit=5)
+
+
+def test_couchbase_query_search_row_processing_error(couchbase_query_ann, mock_cluster, mock_embedder):
+    """Test CouchbaseQuery search when row processing fails."""
+    # Setup mock embedder
+    mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
+    
+    # Setup mock query result with problematic row
+    mock_result = Mock()
+    mock_bad_row = Mock()
+    mock_bad_row.get.side_effect = KeyError("Missing field")
+    mock_good_row = Mock() 
+    mock_good_row.get.side_effect = lambda key: {
+        "id": "test_id_good",
+        "name": "good doc",
+        "content": "good content",
+        "meta_data": {},
+        "embedding": [0.1, 0.2, 0.3],
+        "content_id": None,
+    }[key]
+    mock_result.rows.return_value = [mock_bad_row, mock_good_row]
+    mock_cluster.query.return_value = mock_result
+    
+    # Perform search - should handle bad row gracefully
+    results = couchbase_query_ann.search("test query", limit=5)
+    
+    # Should return only the good result
+    assert len(results) == 1
+    assert results[0].id == "test_id_good"
+
+
+@pytest.mark.asyncio
+async def test_couchbase_query_async_search_ann(couchbase_query_ann, mock_embedder):
+    """Test CouchbaseQuery async search with ANN search type."""
+    # Setup mock embedder
+    mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
+    
+    # Setup async cluster mock
+    mock_async_cluster = AsyncMock()
+    mock_result = AsyncMock()
+    
+    async def mock_rows():
+        mock_row = Mock()
+        mock_row.get.side_effect = lambda key: {
+            "id": "async_test_id",
+            "name": "async test doc",
+            "content": "async test content",
+            "meta_data": {"type": "async"},
+            "embedding": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "content_id": "async_content_123",
+        }[key]
+        yield mock_row
+    
+    mock_result.rows.return_value = mock_rows()
+    mock_async_cluster.query.return_value = mock_result
+    
+    # Mock the get_async_cluster method
+    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
+        # Perform async search
+        results = await couchbase_query_ann.async_search("async test query", limit=5)
+    
+    # Verify async cluster query was called
+    mock_async_cluster.query.assert_called_once()
+    query_sql = mock_async_cluster.query.call_args[0][0]
+    assert "APPROX_VECTOR_DISTANCE" in query_sql
+    assert "COSINE" in query_sql
+    assert ", 10" in query_sql
+    assert "LIMIT 5" in query_sql
+    
+    # Verify results
+    assert len(results) == 1
+    assert results[0].id == "async_test_id"
+    assert results[0].name == "async test doc"
+
+
+@pytest.mark.asyncio
+async def test_couchbase_query_async_search_with_async_embedding(couchbase_query_ann, mock_embedder):
+    """Test CouchbaseQuery async search with async embedding generation."""
+    # Setup mock embedder with async capability
+    mock_embedder.async_get_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3, 0.4, 0.5])
+    
+    # Setup async cluster mock
+    mock_async_cluster = AsyncMock()
+    mock_result = AsyncMock()
+    
+    async def mock_rows():
+        mock_row = Mock()
+        mock_row.get.side_effect = lambda key: {
+            "id": "async_embed_test_id",
+            "name": "async embed test doc", 
+            "content": "async embed test content",
+            "meta_data": {},
+            "embedding": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "content_id": "async_embed_content_123",
+        }[key]
+        yield mock_row
+    
+    mock_result.rows.return_value = mock_rows()
+    mock_async_cluster.query.return_value = mock_result
+    
+    # Mock the get_async_cluster method
+    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
+        # Perform async search
+        results = await couchbase_query_ann.async_search("async embed test query", limit=3)
+    
+    # Verify async embedding was called
+    mock_embedder.async_get_embedding.assert_called_once_with("async embed test query")
+    
+    # Verify results
+    assert len(results) == 1
+    assert results[0].id == "async_embed_test_id"
+
+
+@pytest.mark.asyncio 
+async def test_couchbase_query_async_search_knn(couchbase_query_knn, mock_embedder):
+    """Test CouchbaseQuery async search with KNN search type."""
+    # Setup mock embedder (fallback to sync)
+    mock_embedder.get_embedding.return_value = [0.5, 0.4, 0.3, 0.2, 0.1]
+    
+    # Setup async cluster mock
+    mock_async_cluster = AsyncMock()
+    mock_result = AsyncMock()
+    
+    async def mock_rows():
+        mock_row = Mock()
+        mock_row.get.side_effect = lambda key: {
+            "id": "knn_async_test_id",
+            "name": "knn async test doc",
+            "content": "knn async test content", 
+            "meta_data": {"search_type": "knn"},
+            "embedding": [0.5, 0.4, 0.3, 0.2, 0.1],
+            "content_id": "knn_async_content_123",
+        }[key]
+        yield mock_row
+    
+    mock_result.rows.return_value = mock_rows()
+    mock_async_cluster.query.return_value = mock_result
+    
+    # Mock the get_async_cluster method
+    with patch.object(couchbase_query_knn, 'get_async_cluster', return_value=mock_async_cluster):
+        # Perform async search
+        results = await couchbase_query_knn.async_search("knn async test query", limit=2)
+    
+    # Verify async cluster query was called with KNN
+    query_sql = mock_async_cluster.query.call_args[0][0]
+    assert "VECTOR_DISTANCE" in query_sql  # Not APPROX_VECTOR_DISTANCE
+    assert "DOT" in query_sql
+    assert ", 10" not in query_sql  # No n_probes for KNN
+    assert "LIMIT 2" in query_sql
+    
+    # Verify results
+    assert len(results) == 1
+    assert results[0].id == "knn_async_test_id"
+
+
+@pytest.mark.asyncio
+async def test_couchbase_query_async_search_no_embedding(couchbase_query_ann, mock_embedder):
+    """Test CouchbaseQuery async search when embedding generation fails."""
+    # Setup mock embedder to return None
+    mock_embedder.get_embedding.return_value = None
+    
+    # Perform async search
+    results = await couchbase_query_ann.async_search("test query", limit=5)
+    
+    # Should return empty list
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_couchbase_query_async_search_exception(couchbase_query_ann, mock_embedder):
+    """Test CouchbaseQuery async search exception handling.""" 
+    # Setup mock embedder
+    mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
+    
+    # Setup async cluster mock to raise exception
+    mock_async_cluster = AsyncMock()
+    mock_async_cluster.query.side_effect = Exception("Async query execution failed")
+    
+    # Mock the get_async_cluster method
+    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
+        # Test that exception is propagated
+        with pytest.raises(Exception, match="Async query execution failed"):
+            await couchbase_query_ann.async_search("test query", limit=5)
+
+
+@pytest.mark.asyncio
+async def test_couchbase_query_async_search_row_processing_error(couchbase_query_ann, mock_embedder):
+    """Test CouchbaseQuery async search when row processing fails."""
+    # Setup mock embedder
+    mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
+    
+    # Setup async cluster mock
+    mock_async_cluster = AsyncMock()
+    mock_result = AsyncMock()
+    
+    async def mock_rows_with_error():
+        # First row has error
+        mock_bad_row = Mock()
+        mock_bad_row.get.side_effect = KeyError("Missing async field")
+        yield mock_bad_row
+        
+        # Second row is good
+        mock_good_row = Mock()
+        mock_good_row.get.side_effect = lambda key: {
+            "id": "async_good_id",
+            "name": "async good doc",
+            "content": "async good content",
+            "meta_data": {},
+            "embedding": [0.1, 0.2, 0.3],
+            "content_id": None,
+        }[key]
+        yield mock_good_row
+    
+    mock_result.rows.return_value = mock_rows_with_error()
+    mock_async_cluster.query.return_value = mock_result
+    
+    # Mock the get_async_cluster method
+    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
+        # Perform async search - should handle bad row gracefully
+        results = await couchbase_query_ann.async_search("test query", limit=5)
+    
+    # Should return only the good result
+    assert len(results) == 1
+    assert results[0].id == "async_good_id"
+
+
+@pytest.mark.asyncio
+async def test_couchbase_query_async_create(couchbase_query_ann, mock_bucket):
+    """Test CouchbaseQuery async create method."""
+    # Mock the collections manager
+    collections_manager = Mock()
+    mock_bucket.collections.return_value = collections_manager
+    
+    # Mock async collection and scope creation
+    with patch.object(couchbase_query_ann, '_async_create_collection_and_scope', new_callable=AsyncMock) as mock_async_create:
+        # Call async create method
+        await couchbase_query_ann.async_create()
+        
+        # Verify that async collection and scope creation was called
+        mock_async_create.assert_called_once()
+
+
+def test_couchbase_query_enum_values():
+    """Test QueryVectorSearchType and QueryVectorSearchSimilarity enum values."""
+    # Test search types
+    assert QueryVectorSearchType.ANN == "ANN"
+    assert QueryVectorSearchType.KNN == "KNN"
+    
+    # Test similarity metrics
+    assert QueryVectorSearchSimilarity.COSINE == "COSINE"
+    assert QueryVectorSearchSimilarity.DOT == "DOT"
+    assert QueryVectorSearchSimilarity.L2 == "L2"
+    assert QueryVectorSearchSimilarity.EUCLIDEAN == "EUCLIDEAN"
+    assert QueryVectorSearchSimilarity.L2_SQUARED == "L2_SQUARED"
+    assert QueryVectorSearchSimilarity.EUCLIDEAN_SQUARED == "EUCLIDEAN_SQUARED"
+
+
+def test_couchbase_query_similarity_string_conversion(mock_collection, mock_embedder):
+    """Test that similarity strings are properly converted to uppercase."""
+    # Test lowercase similarity string
+    query_db = CouchbaseQuery(
+        bucket_name="test_bucket",
+        scope_name="test_scope",
+        collection_name="test_collection", 
+        couchbase_connection_string="couchbase://localhost",
+        search_type=QueryVectorSearchType.ANN,
+        similarity="cosine",  # lowercase
+        n_probes=5,
+        cluster_options=ClusterOptions(
+            authenticator=PasswordAuthenticator("username", "password"),
+        ),
+        embedder=mock_embedder,
+    )
+    
+    # Should be converted to uppercase
+    assert query_db._similarity == "COSINE"
+
+
+def test_couchbase_query_custom_embedding_key(mock_collection, mock_embedder):
+    """Test CouchbaseQuery with custom embedding key."""
+    query_db = CouchbaseQuery(
+        bucket_name="test_bucket",
+        scope_name="test_scope",
+        collection_name="test_collection",
+        couchbase_connection_string="couchbase://localhost", 
+        search_type=QueryVectorSearchType.KNN,
+        similarity=QueryVectorSearchSimilarity.L2,
+        n_probes=None,
+        cluster_options=ClusterOptions(
+            authenticator=PasswordAuthenticator("username", "password"),
+        ),
+        embedder=mock_embedder,
+        embedding_key="custom_embedding_field",
+    )
+    
+    assert query_db._embedding_key == "custom_embedding_field"

@@ -49,7 +49,7 @@ try:
 except ImportError:
     raise ImportError("`couchbase` not installed. Please install using `pip install couchbase`")
 
-class CouchbaseUtils(VectorDb):
+class CouchbaseBase(VectorDb):
     """
     Base Couchbase Vector Database implementation.
     """
@@ -1098,7 +1098,7 @@ class CouchbaseUtils(VectorDb):
     async def async_create(self) -> None:
         raise NotImplementedError
     
-class CouchbaseSearch(CouchbaseUtils):
+class CouchbaseSearch(CouchbaseBase):
     """
     Couchbase Vector Database implementation with FTS (Full Text Search) index support.
     """
@@ -1499,7 +1499,7 @@ class QueryVectorSearchSimilarity(str, Enum):
     EUCLIDEAN_SQUARED = "EUCLIDEAN_SQUARED"
 
 
-class CouchbaseQuery(CouchbaseUtils):
+class CouchbaseQuery(CouchbaseBase):
     def __init__(self,
 
         bucket_name: str,

@@ -1482,14 +1482,14 @@ def test_couchbase_query_search_ann(couchbase_query_ann, mock_cluster, mock_embe
     # Setup mock query result
     mock_result = Mock()
     mock_row = Mock()
-    mock_row.get.side_effect = lambda key: {
+    mock_row.get.side_effect = lambda key, default=None: {
         "id": "test_id_1",
         "name": "test doc 1", 
         "content": "test content 1",
         "meta_data": {"category": "test"},
         "embedding": [0.1, 0.2, 0.3, 0.4, 0.5],
         "content_id": "content_123",
-    }[key]
+    }.get(key, default)
     mock_result.rows.return_value = [mock_row]
     mock_cluster.query.return_value = mock_result
     
@@ -1524,14 +1524,14 @@ def test_couchbase_query_search_knn(couchbase_query_knn, mock_cluster, mock_embe
     # Setup mock query result
     mock_result = Mock()
     mock_row = Mock()
-    mock_row.get.side_effect = lambda key: {
+    mock_row.get.side_effect = lambda key, default=None: {
         "id": "test_id_2",
         "name": "test doc 2",
         "content": "test content 2", 
         "meta_data": {"priority": "high"},
         "embedding": [0.2, 0.3, 0.4, 0.5, 0.6],
         "content_id": "content_456",
-    }[key]
+    }.get(key, default)
     mock_result.rows.return_value = [mock_row]
     mock_cluster.query.return_value = mock_result
     
@@ -1584,16 +1584,16 @@ def test_couchbase_query_search_row_processing_error(couchbase_query_ann, mock_c
     # Setup mock query result with problematic row
     mock_result = Mock()
     mock_bad_row = Mock()
-    mock_bad_row.get.side_effect = KeyError("Missing field")
+    mock_bad_row.get.side_effect = lambda key, default=None: (_ for _ in ()).throw(KeyError("Missing field"))
     mock_good_row = Mock() 
-    mock_good_row.get.side_effect = lambda key: {
+    mock_good_row.get.side_effect = lambda key, default=None: {
         "id": "test_id_good",
         "name": "good doc",
         "content": "good content",
         "meta_data": {},
         "embedding": [0.1, 0.2, 0.3],
         "content_id": None,
-    }[key]
+    }.get(key, default)
     mock_result.rows.return_value = [mock_bad_row, mock_good_row]
     mock_cluster.query.return_value = mock_result
     
@@ -1613,21 +1613,21 @@ async def test_couchbase_query_async_search_ann(couchbase_query_ann, mock_embedd
     
     # Setup async cluster mock
     mock_async_cluster = AsyncMock()
-    mock_result = AsyncMock()
+    mock_result = Mock()
     
     async def mock_rows():
         mock_row = Mock()
-        mock_row.get.side_effect = lambda key: {
+        mock_row.get.side_effect = lambda key, default=None: {
             "id": "async_test_id",
             "name": "async test doc",
             "content": "async test content",
             "meta_data": {"type": "async"},
             "embedding": [0.1, 0.2, 0.3, 0.4, 0.5],
             "content_id": "async_content_123",
-        }[key]
+        }.get(key, default)
         yield mock_row
     
-    mock_result.rows.return_value = mock_rows()
+    mock_result.rows = mock_rows
     mock_async_cluster.query.return_value = mock_result
     
     # Mock the get_async_cluster method
@@ -1657,21 +1657,21 @@ async def test_couchbase_query_async_search_with_async_embedding(couchbase_query
     
     # Setup async cluster mock
     mock_async_cluster = AsyncMock()
-    mock_result = AsyncMock()
+    mock_result = Mock()
     
     async def mock_rows():
         mock_row = Mock()
-        mock_row.get.side_effect = lambda key: {
+        mock_row.get.side_effect = lambda key, default=None: {
             "id": "async_embed_test_id",
             "name": "async embed test doc", 
             "content": "async embed test content",
             "meta_data": {},
             "embedding": [0.1, 0.2, 0.3, 0.4, 0.5],
             "content_id": "async_embed_content_123",
-        }[key]
+        }.get(key, default)
         yield mock_row
     
-    mock_result.rows.return_value = mock_rows()
+    mock_result.rows = mock_rows
     mock_async_cluster.query.return_value = mock_result
     
     # Mock the get_async_cluster method
@@ -1695,21 +1695,21 @@ async def test_couchbase_query_async_search_knn(couchbase_query_knn, mock_embedd
     
     # Setup async cluster mock
     mock_async_cluster = AsyncMock()
-    mock_result = AsyncMock()
+    mock_result = Mock()
     
     async def mock_rows():
         mock_row = Mock()
-        mock_row.get.side_effect = lambda key: {
+        mock_row.get.side_effect = lambda key, default=None: {
             "id": "knn_async_test_id",
             "name": "knn async test doc",
             "content": "knn async test content", 
             "meta_data": {"search_type": "knn"},
             "embedding": [0.5, 0.4, 0.3, 0.2, 0.1],
             "content_id": "knn_async_content_123",
-        }[key]
+        }.get(key, default)
         yield mock_row
     
-    mock_result.rows.return_value = mock_rows()
+    mock_result.rows = mock_rows
     mock_async_cluster.query.return_value = mock_result
     
     # Mock the get_async_cluster method
@@ -1735,8 +1735,11 @@ async def test_couchbase_query_async_search_no_embedding(couchbase_query_ann, mo
     # Setup mock embedder to return None
     mock_embedder.get_embedding.return_value = None
     
-    # Perform async search
-    results = await couchbase_query_ann.async_search("test query", limit=5)
+    # Mock the get_async_cluster to avoid actual connection
+    mock_async_cluster = AsyncMock()
+    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
+        # Perform async search
+        results = await couchbase_query_ann.async_search("test query", limit=5)
     
     # Should return empty list
     assert results == []
@@ -1767,27 +1770,27 @@ async def test_couchbase_query_async_search_row_processing_error(couchbase_query
     
     # Setup async cluster mock
     mock_async_cluster = AsyncMock()
-    mock_result = AsyncMock()
+    mock_result = Mock()
     
     async def mock_rows_with_error():
         # First row has error
         mock_bad_row = Mock()
-        mock_bad_row.get.side_effect = KeyError("Missing async field")
+        mock_bad_row.get.side_effect = lambda key, default=None: (_ for _ in ()).throw(KeyError("Missing async field"))
         yield mock_bad_row
         
         # Second row is good
         mock_good_row = Mock()
-        mock_good_row.get.side_effect = lambda key: {
+        mock_good_row.get.side_effect = lambda key, default=None: {
             "id": "async_good_id",
             "name": "async good doc",
             "content": "async good content",
             "meta_data": {},
             "embedding": [0.1, 0.2, 0.3],
             "content_id": None,
-        }[key]
+        }.get(key, default)
         yield mock_good_row
     
-    mock_result.rows.return_value = mock_rows_with_error()
+    mock_result.rows = mock_rows_with_error
     mock_async_cluster.query.return_value = mock_result
     
     # Mock the get_async_cluster method

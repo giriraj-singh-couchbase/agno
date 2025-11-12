@@ -1584,7 +1584,10 @@ def test_couchbase_query_search_row_processing_error(couchbase_query_ann, mock_c
     # Setup mock query result with problematic row
     mock_result = Mock()
     mock_bad_row = Mock()
-    mock_bad_row.get.side_effect = lambda key, default=None: (_ for _ in ()).throw(KeyError("Missing field"))
+    # Use a function that raises KeyError when called
+    def raise_key_error(key, default=None):
+        raise KeyError("Missing field")
+    mock_bad_row.get.side_effect = raise_key_error
     mock_good_row = Mock() 
     mock_good_row.get.side_effect = lambda key, default=None: {
         "id": "test_id_good",
@@ -1735,11 +1738,8 @@ async def test_couchbase_query_async_search_no_embedding(couchbase_query_ann, mo
     # Setup mock embedder to return None
     mock_embedder.get_embedding.return_value = None
     
-    # Mock the get_async_cluster to avoid actual connection
-    mock_async_cluster = AsyncMock()
-    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
-        # Perform async search
-        results = await couchbase_query_ann.async_search("test query", limit=5)
+    # Perform async search - should return empty list without calling cluster
+    results = await couchbase_query_ann.async_search("test query", limit=5)
     
     # Should return empty list
     assert results == []
@@ -1775,7 +1775,9 @@ async def test_couchbase_query_async_search_row_processing_error(couchbase_query
     async def mock_rows_with_error():
         # First row has error
         mock_bad_row = Mock()
-        mock_bad_row.get.side_effect = lambda key, default=None: (_ for _ in ()).throw(KeyError("Missing async field"))
+        def raise_key_error(key, default=None):
+            raise KeyError("Missing async field")
+        mock_bad_row.get.side_effect = raise_key_error
         yield mock_bad_row
         
         # Second row is good

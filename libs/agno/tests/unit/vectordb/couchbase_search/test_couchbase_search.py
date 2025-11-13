@@ -598,6 +598,8 @@ async def test_async_drop(couchbase_fts):
         with patch.object(couchbase_fts, "async_exists", AsyncMock(return_value=True)):
             await couchbase_fts.async_drop()
             mock_collections_mgr.drop_collection.assert_called_once()
+            # Reset the mock so the next branch starts with a clean slate.
+            mock_collections_mgr.drop_collection.reset_mock()
         with patch.object(couchbase_fts, "async_exists", AsyncMock(return_value=False)):
             await couchbase_fts.async_drop()
             mock_collections_mgr.drop_collection.assert_not_called()

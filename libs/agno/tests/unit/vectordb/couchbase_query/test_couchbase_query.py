@@ -7,7 +7,6 @@ from couchbase.cluster import Cluster
 from couchbase.collection import Collection
 from couchbase.options import ClusterOptions
 
-from agno.knowledge.document import Document
 from agno.vectordb.couchbase.couchbase import (
     CouchbaseQuery,
     OpenAIEmbedder,
@@ -284,9 +283,11 @@ async def test_couchbase_query_async_search_row_processing_error(couchbase_query
     mock_async_cluster = AsyncMock()
     mock_result = Mock()
     async def mock_rows_with_error():
-        bad_row = Mock(); bad_row.get.side_effect = lambda key, default=None: (_ for _ in ()).throw(KeyError("Missing async field"))
+        bad_row = Mock()
+        bad_row.get.side_effect = lambda key, default=None: (_ for _ in ()).throw(KeyError("Missing async field"))
         yield bad_row
-        good_row = Mock(); good_row.get.side_effect = lambda key, default=None: {
+        good_row = Mock()
+        good_row.get.side_effect = lambda key, default=None: {
             "id": "async_good_id",
             "name": "async good doc",
             "content": "async good content",

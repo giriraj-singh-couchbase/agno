@@ -682,16 +682,23 @@ def test_delete_by_id(couchbase_fts, mock_collection):
 
 def test_delete_by_name(couchbase_fts, mock_scope, mock_collection):
     mock_result = Mock()
-    mock_row1 = Mock(); mock_row1.get.return_value = "doc_1"
-    mock_row2 = Mock(); mock_row2.get.return_value = "doc_2"
+    mock_row1 = Mock()
+    mock_row1.get.return_value = "doc_1"
+    mock_row2 = Mock()
+    mock_row2.get.return_value = "doc_2"
     mock_result.rows.return_value = [mock_row1, mock_row2]
     mock_scope.query.return_value = mock_result
+    # Configure batch removal mock
+    mock_multi_remove_result = Mock()
+    mock_multi_remove_result.all_ok = True
+    mock_multi_remove_result.exceptions = {}
+    mock_collection.remove_multi = Mock(return_value=mock_multi_remove_result)
     result = couchbase_fts.delete_by_name("test_document")
     assert result is True
-    assert mock_collection.remove.call_count == 2
+    mock_collection.remove_multi.assert_called_once()
     mock_result.rows.return_value = []
     result = couchbase_fts.delete_by_name("nonexistent_document")
-    assert result is True
+    assert result is False  # returns False when no documents found
     mock_scope.query.side_effect = Exception("Query error")
     result = couchbase_fts.delete_by_name("test_document")
     assert result is False
@@ -699,16 +706,22 @@ def test_delete_by_name(couchbase_fts, mock_scope, mock_collection):
 
 def test_delete_by_metadata(couchbase_fts, mock_scope, mock_collection):
     mock_result = Mock()
-    mock_row1 = Mock(); mock_row1.get.return_value = "doc_1"
-    mock_row2 = Mock(); mock_row2.get.return_value = "doc_2"
+    mock_row1 = Mock()
+    mock_row1.get.return_value = "doc_1"
+    mock_row2 = Mock()
+    mock_row2.get.return_value = "doc_2"
     mock_result.rows.return_value = [mock_row1, mock_row2]
     mock_scope.query.return_value = mock_result
     metadata = {"category": "test", "priority": "high"}
+    mock_multi_remove_result = Mock()
+    mock_multi_remove_result.all_ok = True
+    mock_multi_remove_result.exceptions = {}
+    mock_collection.remove_multi = Mock(return_value=mock_multi_remove_result)
     result = couchbase_fts.delete_by_metadata(metadata)
-    assert result is True and mock_collection.remove.call_count == 2
+    assert result is True and mock_collection.remove_multi.call_count == 1
     mock_result.rows.return_value = []
     result = couchbase_fts.delete_by_metadata({"category": "nonexistent"})
-    assert result is True
+    assert result is False
     result = couchbase_fts.delete_by_metadata({})
     assert result is False
     mock_scope.query.side_effect = Exception("Query error")
@@ -718,15 +731,21 @@ def test_delete_by_metadata(couchbase_fts, mock_scope, mock_collection):
 
 def test_delete_by_content_id(couchbase_fts, mock_scope, mock_collection):
     mock_result = Mock()
-    mock_row1 = Mock(); mock_row1.get.return_value = "doc_1"
-    mock_row2 = Mock(); mock_row2.get.return_value = "doc_2"
+    mock_row1 = Mock()
+    mock_row1.get.return_value = "doc_1"
+    mock_row2 = Mock()
+    mock_row2.get.return_value = "doc_2"
     mock_result.rows.return_value = [mock_row1, mock_row2]
     mock_scope.query.return_value = mock_result
+    mock_multi_remove_result = Mock()
+    mock_multi_remove_result.all_ok = True
+    mock_multi_remove_result.exceptions = {}
+    mock_collection.remove_multi = Mock(return_value=mock_multi_remove_result)
     result = couchbase_fts.delete_by_content_id("content_123")
     assert result is True
     mock_result.rows.return_value = []
     result = couchbase_fts.delete_by_content_id("nonexistent_content")
-    assert result is True
+    assert result is False
     mock_scope.query.side_effect = Exception("Query error")
     result = couchbase_fts.delete_by_content_id("content_123")
     assert result is False

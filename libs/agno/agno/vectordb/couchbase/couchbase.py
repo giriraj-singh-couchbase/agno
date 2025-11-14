@@ -514,15 +514,41 @@ class CouchbaseBase(VectorDb):
 
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name"
             result = self.scope.query(
-                query, QueryOptions(named_parameters={"name": name}, scan_consistency=QueryScanConsistency.REQUEST_PLUS)
+                query,
+                QueryOptions(
+                    named_parameters={"name": name},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
             )
-            rows = list(result.rows())  # Collect once
+            rows = list(result.rows())
+            doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
+            if not doc_ids:
+                log_info(f"No documents found with name {name} to delete")
+                return False
 
-            for row in rows:
-                self.collection.remove(row.get("doc_id"))
-            log_info(f"Deleted {len(rows)} documents with name {name}")
-            return True
+            try:
+                remove_result = self.collection.remove_multi(doc_ids)
+            except AttributeError:
+                deleted_count = 0
+                for doc_id in doc_ids:
+                    try:
+                        self.collection.remove(doc_id)
+                        deleted_count += 1
+                    except Exception as single_err:
+                        logger.warning(f"Failed to delete document '{doc_id}': {single_err}")
+                log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with name {name} (fallback single deletes)")
+                return deleted_count > 0
 
+            if getattr(remove_result, "all_ok", False):
+                deleted_count = len(doc_ids)
+            else:
+                exceptions = getattr(remove_result, "exceptions", {}) or {}
+                deleted_count = len(doc_ids) - len(exceptions)
+                if exceptions:
+                    logger.warning(f"Partial failures during batch delete for name {name}: {exceptions}")
+
+            log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with name {name}")
+            return deleted_count > 0
         except Exception as e:
             log_info(f"Error deleting documents with name {name}: {e}")
             return False
@@ -544,30 +570,20 @@ class CouchbaseBase(VectorDb):
                 log_info("No metadata provided for deletion")
                 return False
 
-            # Build WHERE clause for metadata matching
             where_conditions = []
             named_parameters: Dict[str, Any] = {}
-
             for key, value in metadata.items():
                 if isinstance(value, (list, tuple)):
-                    # For array values, use ARRAY_CONTAINS
                     where_conditions.append(
                         f"(ARRAY_CONTAINS(filters.{key}, $value_{key}) OR ARRAY_CONTAINS(recipes.filters.{key}, $value_{key}))"
                     )
                     named_parameters[f"value_{key}"] = value
-                elif isinstance(value, str):
-                    where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
-                    named_parameters[f"value_{key}"] = value
-                elif isinstance(value, bool):
-                    where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
-                    named_parameters[f"value_{key}"] = value
-                elif isinstance(value, (int, float)):
+                elif isinstance(value, (str, bool, int, float)):
                     where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
                     named_parameters[f"value_{key}"] = value
                 elif value is None:
                     where_conditions.append(f"(filters.{key} IS NULL OR recipes.filters.{key} IS NULL)")
                 else:
-                    # For other types, convert to string
                     where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
                     named_parameters[f"value_{key}"] = str(value)
 
@@ -577,18 +593,42 @@ class CouchbaseBase(VectorDb):
 
             where_clause = " AND ".join(where_conditions)
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE {where_clause}"
-
             result = self.scope.query(
                 query,
-                QueryOptions(named_parameters=named_parameters, scan_consistency=QueryScanConsistency.REQUEST_PLUS),
+                QueryOptions(
+                    named_parameters=named_parameters,
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
             )
-            rows = list(result.rows())  # Collect once
+            rows = list(result.rows())
+            doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
+            if not doc_ids:
+                log_info(f"No documents found matching metadata {metadata} to delete")
+                return False
 
-            for row in rows:
-                self.collection.remove(row.get("doc_id"))
-            log_info(f"Deleted {len(rows)} documents with metadata {metadata}")
-            return True
+            try:
+                remove_result = self.collection.remove_multi(doc_ids)
+            except AttributeError:
+                deleted_count = 0
+                for doc_id in doc_ids:
+                    try:
+                        self.collection.remove(doc_id)
+                        deleted_count += 1
+                    except Exception as single_err:
+                        logger.warning(f"Failed to delete document '{doc_id}': {single_err}")
+                log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with metadata {metadata} (fallback single deletes)")
+                return deleted_count > 0
 
+            if getattr(remove_result, "all_ok", False):
+                deleted_count = len(doc_ids)
+            else:
+                exceptions = getattr(remove_result, "exceptions", {}) or {}
+                deleted_count = len(doc_ids) - len(exceptions)
+                if exceptions:
+                    logger.warning(f"Partial failures during batch delete for metadata {metadata}: {exceptions}")
+
+            log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with metadata {metadata}")
+            return deleted_count > 0
         except Exception as e:
             log_info(f"Error deleting documents with metadata {metadata}: {e}")
             return False
@@ -606,19 +646,55 @@ class CouchbaseBase(VectorDb):
         try:
             log_debug(f"Couchbase VectorDB : Deleting documents with content_id {content_id}")
 
-            query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_id = $content_id OR recipes.content_id = $content_id"
+            query = (
+                f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} "
+                "WHERE content_id = $content_id OR recipes.content_id = $content_id"
+            )
             result = self.scope.query(
                 query,
                 QueryOptions(
-                    named_parameters={"content_id": content_id}, scan_consistency=QueryScanConsistency.REQUEST_PLUS
+                    named_parameters={"content_id": content_id},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
                 ),
             )
-            rows = list(result.rows())  # Collect once
+            rows = list(result.rows())
 
-            for row in rows:
-                self.collection.remove(row.get("doc_id"))
-            log_info(f"Deleted {len(rows)} documents with content_id {content_id}")
-            return True
+            # Collect IDs to delete
+            doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
+            if not doc_ids:
+                log_info(f"No documents found with content_id {content_id} to delete")
+                return False
+
+            # Use batch removal for efficiency
+            try:
+                remove_result = self.collection.remove_multi(doc_ids)
+            except AttributeError:
+                # Fallback if SDK does not support remove_multi
+                deleted_count = 0
+                for doc_id in doc_ids:
+                    try:
+                        self.collection.remove(doc_id)
+                        deleted_count += 1
+                    except Exception as single_err:
+                        logger.warning(f"Failed to delete document '{doc_id}': {single_err}")
+                log_info(
+                    f"Deleted {deleted_count}/{len(doc_ids)} documents with content_id {content_id} (fallback single deletes)"
+                )
+                return deleted_count > 0
+
+            # Process batch result
+            if getattr(remove_result, "all_ok", False):
+                deleted_count = len(doc_ids)
+            else:
+                exceptions = getattr(remove_result, "exceptions", {}) or {}
+                deleted_count = len(doc_ids) - len(exceptions)
+                if exceptions:
+                    logger.warning(
+                        f"Partial failures during batch delete for content_id {content_id}: {exceptions}"
+                    )
+
+            log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with content_id {content_id}")
+            return deleted_count > 0
 
         except Exception as e:
             log_info(f"Error deleting documents with content_id {content_id}: {e}")
@@ -641,16 +717,39 @@ class CouchbaseBase(VectorDb):
             result = self.scope.query(
                 query,
                 QueryOptions(
-                    named_parameters={"content_hash": content_hash}, scan_consistency=QueryScanConsistency.REQUEST_PLUS
+                    named_parameters={"content_hash": content_hash},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
                 ),
             )
-            rows = list(result.rows())  # Collect once
+            rows = list(result.rows())
+            doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
+            if not doc_ids:
+                log_info(f"No documents found with content_hash {content_hash} to delete")
+                return False
 
-            for row in rows:
-                self.collection.remove(row.get("doc_id"))
-            log_info(f"Deleted {len(rows)} documents with content_hash {content_hash}")
-            return True
+            try:
+                remove_result = self.collection.remove_multi(doc_ids)
+            except AttributeError:
+                deleted_count = 0
+                for doc_id in doc_ids:
+                    try:
+                        self.collection.remove(doc_id)
+                        deleted_count += 1
+                    except Exception as single_err:
+                        logger.warning(f"Failed to delete document '{doc_id}': {single_err}")
+                log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with content_hash {content_hash} (fallback single deletes)")
+                return deleted_count > 0
 
+            if getattr(remove_result, "all_ok", False):
+                deleted_count = len(doc_ids)
+            else:
+                exceptions = getattr(remove_result, "exceptions", {}) or {}
+                deleted_count = len(doc_ids) - len(exceptions)
+                if exceptions:
+                    logger.warning(f"Partial failures during batch delete for content_hash {content_hash}: {exceptions}")
+
+            log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with content_hash {content_hash}")
+            return deleted_count > 0
         except Exception as e:
             log_info(f"Error deleting documents with content_hash {content_hash}: {e}")
             return False

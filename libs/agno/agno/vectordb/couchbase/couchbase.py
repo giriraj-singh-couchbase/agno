@@ -497,7 +497,13 @@ class CouchbaseBase(VectorDb):
         try:
             # Use N1QL query to check if document with given name exists
             query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
-            result = self.scope.query(query, self._apply_query_options(named_parameters={"name": name}))
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters={"name": name},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
             for row in result.rows():
                 return True
             return False
@@ -521,7 +527,13 @@ class CouchbaseBase(VectorDb):
         try:
             # Use N1QL query to check if document with given content_hash exists
             query = f"SELECT content_hash FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_hash = $content_hash LIMIT 1"
-            result = self.scope.query(query, self._apply_query_options(named_parameters={"content_hash": content_hash}))
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters={"content_hash": content_hash},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
             for row in result.rows():
                 return True
             return False
@@ -570,7 +582,13 @@ class CouchbaseBase(VectorDb):
             log_debug(f"Couchbase VectorDB : Deleting documents with name {name}")
 
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name"
-            result = self.scope.query(query, self._apply_query_options(named_parameters={"name": name}))
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters={"name": name},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
             rows = list(result.rows())
             doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
             if not doc_ids:
@@ -644,7 +662,13 @@ class CouchbaseBase(VectorDb):
 
             where_clause = " AND ".join(where_conditions)
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE {where_clause}"
-            result = self.scope.query(query, self._apply_query_options(named_parameters=named_parameters))
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters=named_parameters,
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
             rows = list(result.rows())
             doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
             if not doc_ids:
@@ -695,7 +719,13 @@ class CouchbaseBase(VectorDb):
                 f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} "
                 "WHERE content_id = $content_id OR recipes.content_id = $content_id"
             )
-            result = self.scope.query(query, self._apply_query_options(named_parameters={"content_id": content_id}))
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters={"content_id": content_id},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
             rows = list(result.rows())
 
             # Collect IDs to delete
@@ -753,7 +783,13 @@ class CouchbaseBase(VectorDb):
             log_debug(f"Couchbase VectorDB : Deleting documents with content_hash {content_hash}")
 
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_hash = $content_hash"
-            result = self.scope.query(query, self._apply_query_options(named_parameters={"content_hash": content_hash}))
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters={"content_hash": content_hash},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
             rows = list(result.rows())
             doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
             if not doc_ids:
@@ -988,7 +1024,13 @@ class CouchbaseBase(VectorDb):
         try:
             query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
             async_scope_instance = await self.get_async_scope()
-            result = async_scope_instance.query(query, self._apply_query_options(named_parameters={"name": name}))
+            result = async_scope_instance.query(
+                query,
+                self._apply_query_options(
+                    named_parameters={"name": name},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
             async for row in result.rows():
                 return True
             return False

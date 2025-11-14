@@ -1832,7 +1832,9 @@ class CouchbaseQuery(CouchbaseBase):
         try:
             # Execute the query using async cluster
             async_cluster_instance = await self.get_async_cluster()
-            result = await async_cluster_instance.query(query_str)
+            # acouchbase AsyncCluster.query returns a QueryResult whose rows() are consumed asynchronously;
+            # it is not itself awaitable. Remove the extra await to avoid "QueryResult object can't be awaited".
+            result = async_cluster_instance.query(query_str)
             
             documents: List[Document] = []
             

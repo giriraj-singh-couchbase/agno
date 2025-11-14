@@ -1,7 +1,10 @@
+from abc import abstractmethod
 import asyncio
+from enum import Enum
 import time
 from datetime import timedelta
 from typing import Any, Dict, List, Optional, Union
+import inspect
 
 from agno.knowledge.document import Document
 from agno.knowledge.embedder import Embedder
@@ -47,12 +50,10 @@ try:
 except ImportError:
     raise ImportError("`couchbase` not installed. Please install using `pip install couchbase`")
 
-
-class CouchbaseSearch(VectorDb):
+class CouchbaseBase(VectorDb):
     """
-    Couchbase Vector Database implementation with FTS (Full Text Search) index support.
+    Base Couchbase Vector Database implementation.
     """
-
     def __init__(
         self,
         bucket_name: str,
@@ -60,37 +61,15 @@ class CouchbaseSearch(VectorDb):
         collection_name: str,
         couchbase_connection_string: str,
         cluster_options: ClusterOptions,
-        search_index: Union[str, SearchIndex],
         embedder: Embedder = OpenAIEmbedder(),
         overwrite: bool = False,
-        is_global_level_index: bool = False,
-        wait_until_index_ready: float = 0,
         batch_limit: int = 500,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        **kwargs,
+        default_query_options: Optional[QueryOptions] = None,
     ):
-        """
-        Initialize the CouchbaseSearch with Couchbase connection details.
-
-        Args:
-            bucket_name (str): Name of the Couchbase bucket.
-            scope_name (str): Name of the scope within the bucket.
-            collection_name (str): Name of the collection within the scope.
-            name (Optional[str]): Name of the vector database.
-            description (Optional[str]): Description of the vector database.
-            couchbase_connection_string (str): Couchbase connection string.
-            cluster_options (ClusterOptions): Options for configuring the Couchbase cluster connection.
-            search_index (Union[str, SearchIndex], optional): Search index configuration, either as index name or SearchIndex definition.
-            embedder (Embedder): Embedder instance for generating embeddings. Defaults to OpenAIEmbedder.
-            overwrite (bool): Whether to overwrite existing collection. Defaults to False.
-            wait_until_index_ready (float, optional): Time in seconds to wait until the index is ready. Defaults to 0.
-            batch_limit (int, optional): Maximum number of documents to process in a single batch (applies to both sync and async operations). Defaults to 500.
-            **kwargs: Additional arguments for Couchbase connection.
-        """
         if not bucket_name:
             raise ValueError("Bucket name must not be empty.")
-
         self.bucket_name = bucket_name
         self.scope_name = scope_name
         self.collection_name = collection_name
@@ -98,20 +77,11 @@ class CouchbaseSearch(VectorDb):
         self.cluster_options = cluster_options
         self.embedder = embedder
         self.overwrite = overwrite
-        self.is_global_level_index = is_global_level_index
-        self.wait_until_index_ready = wait_until_index_ready
-        # Initialize base class with name and description
-        super().__init__(name=name, description=description)
-
-        self.kwargs = kwargs
         self.batch_limit = batch_limit
-        if isinstance(search_index, str):
-            self.search_index_name = search_index
-            self.search_index_definition = None
-        else:
-            self.search_index_name = search_index.name
-            self.search_index_definition = search_index
-
+        # Optional base QueryOptions provided by user. Will be merged with per-query dynamic parameters.
+        self.default_query_options = default_query_options
+        super().__init__(name=name, description=description)
+        
         self._cluster: Optional[Cluster] = None
         self._bucket: Optional[Bucket] = None
         self._scope: Optional[Scope] = None
@@ -122,6 +92,67 @@ class CouchbaseSearch(VectorDb):
         self._async_scope: Optional[AsyncScope] = None
         self._async_collection: Optional[AsyncCollection] = None
 
+    def _apply_query_options(
+        self,
+        named_parameters: Optional[Dict[str, Any]] = None,
+        **overrides: Any,
+    ) -> QueryOptions:
+        """Merge user provided default QueryOptions with dynamic per-call parameters.
+
+        Priority (highest last): default_query_options < overrides kwargs < named_parameters arg.
+
+        Ensures scan_consistency defaults to REQUEST_PLUS unless explicitly set in any layer.
+        """
+        # Known QueryOptions attribute names we want to copy forward if present.
+        attr_names = [
+            "scan_consistency",
+            "metrics",
+            "profile",
+            "adhoc",
+            "raw",
+            "timeout",
+            "client_context_id",
+            "positional_parameters",
+            "named_parameters",
+            "read_only",
+            "flex_index",
+            "use_replica",
+            "max_parallelism",
+            "scan_wait",
+            "scan_cap",
+            "pipeline_batch",
+            "pipeline_cap",
+        ]
+        opt_kwargs: Dict[str, Any] = {}
+        # Start with defaults from user supplied QueryOptions (if any)
+        if self.default_query_options is not None:
+            for attr in attr_names:
+                val = getattr(self.default_query_options, attr, None)
+                if val is not None:
+                    # Make a shallow copy for mutable params to avoid accidental mutation of base
+                    if isinstance(val, dict):
+                        opt_kwargs[attr] = val.copy()
+                    elif isinstance(val, (list, tuple)):
+                        opt_kwargs[attr] = list(val)
+                    else:
+                        opt_kwargs[attr] = val
+
+        # Apply override kwargs (e.g., caller explicitly sets scan_consistency)
+        for k, v in overrides.items():
+            opt_kwargs[k] = v
+
+        # Merge named parameters (caller wins)
+        if named_parameters:
+            existing_named = opt_kwargs.get("named_parameters", {}) or {}
+            merged_named = {**existing_named, **named_parameters}
+            opt_kwargs["named_parameters"] = merged_named
+
+        # Guarantee a reasonable default for scan_consistency if not provided anywhere.
+        if "scan_consistency" not in opt_kwargs or opt_kwargs["scan_consistency"] is None:
+            opt_kwargs["scan_consistency"] = QueryScanConsistency.REQUEST_PLUS
+
+        return QueryOptions(**opt_kwargs)
+    
     @property
     def cluster(self) -> Cluster:
         """Create or retrieve the Couchbase cluster connection."""
@@ -233,66 +264,6 @@ class CouchbaseSearch(VectorDb):
             except Exception as e:
                 logger.error(f"Error creating collection '{self.collection_name}': {e}")
                 raise
-
-    def _search_indexes_mng(self) -> Union[SearchIndexManager, ScopeSearchIndexManager]:
-        """Get the search indexes manager."""
-        if self.is_global_level_index:
-            return self.cluster.search_indexes()
-        else:
-            return self.scope.search_indexes()
-
-    def _create_fts_index(self):
-        """Create a FTS index on the collection if it doesn't exist."""
-        try:
-            # Check if index exists and handle string index name
-            self._search_indexes_mng().get_index(self.search_index_name)
-            if not self.overwrite:
-                return
-        except Exception:
-            if self.search_index_definition is None:
-                raise ValueError(f"Index '{self.search_index_name}' does not exist")
-
-        # Create or update index
-        try:
-            if self.overwrite:
-                try:
-                    logger.info(f"Dropping existing FTS index '{self.search_index_name}'")
-                    self._search_indexes_mng().drop_index(self.search_index_name)
-                except SearchIndexNotFoundException:
-                    logger.warning(f"Index '{self.search_index_name}' does not exist")
-                except Exception as e:
-                    logger.warning(f"Error dropping index (may not exist): {e}")
-
-            self._search_indexes_mng().upsert_index(self.search_index_definition)
-            logger.info(f"Created FTS index '{self.search_index_name}'")
-
-            if self.wait_until_index_ready:
-                self._wait_for_index_ready()
-
-        except Exception as e:
-            logger.error(f"Error creating FTS index '{self.search_index_name}': {e}")
-            raise
-
-    def _wait_for_index_ready(self):
-        """Wait until the FTS index is ready."""
-        start_time = time.time()
-        while True:
-            try:
-                count = self._search_indexes_mng().get_indexed_documents_count(self.search_index_name)
-                if count > -1:
-                    logger.info(f"FTS index '{self.search_index_name}' is ready")
-                    break
-                # logger.info(f"FTS index '{self.search_index_name}' is not ready yet status: {index['status']}")
-            except Exception as e:
-                if time.time() - start_time > self.wait_until_index_ready:
-                    logger.error(f"Error checking index status: {e}")
-                    raise TimeoutError("Timeout waiting for FTS index to become ready")
-                time.sleep(1)
-
-    def create(self) -> None:
-        """Create the collection and FTS index if they don't exist."""
-        self._create_collection_and_scope()
-        self._create_fts_index()
 
     def insert(self, content_hash: str, documents: List[Document], filters: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -458,85 +429,6 @@ class CouchbaseSearch(VectorDb):
         if errors_occurred:
             logger.warning("Some errors occurred during the upsert operation. Please check logs for details.")
 
-    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
-        """Search the Couchbase bucket for documents relevant to the query."""
-        query_embedding = self.embedder.get_embedding(query)
-        if query_embedding is None:
-            logger.error(f"Failed to generate embedding for query: {query}")
-            return []
-
-        try:
-            # Implement vector search using Couchbase FTS
-            vector_search = VectorSearch.from_vector_query(
-                VectorQuery(field_name="embedding", vector=query_embedding, num_candidates=limit)
-            )
-            request = SearchRequest.create(vector_search)
-
-            # Prepare the options dictionary
-            options_dict = {"limit": limit, "fields": ["*"]}
-            if filters:
-                options_dict["raw"] = filters
-
-            search_args = {
-                "index": self.search_index_name,
-                "request": request,
-                "options": SearchOptions(**options_dict),  # Construct SearchOptions with the dictionary
-            }
-
-            if self.is_global_level_index:
-                results = self.cluster.search(**search_args)
-            else:
-                results = self.scope.search(**search_args)
-
-            return self.__get_doc_from_kv(results)
-        except Exception as e:
-            logger.error(f"Error during search: {e}")
-            raise
-
-    def __get_doc_from_kv(self, response: SearchResult) -> List[Document]:
-        """
-        Convert search results to Document objects by fetching full documents from KV store.
-
-        Args:
-            response: SearchResult from Couchbase search query
-
-        Returns:
-            List of Document objects
-        """
-        documents: List[Document] = []
-        search_hits = [(doc.id, doc.score) for doc in response.rows()]
-
-        if not search_hits:
-            return documents
-
-        # Fetch documents from KV store
-        ids = [hit[0] for hit in search_hits]
-        kv_response = self.collection.get_multi(keys=ids)
-
-        if not kv_response.all_ok:
-            raise Exception(f"Failed to get documents from KV store: {kv_response.exceptions}")
-
-        # Convert results to Documents
-        for doc_id, score in search_hits:
-            get_result = kv_response.results.get(doc_id)
-            if get_result is None or not get_result.success:
-                logger.warning(f"Document {doc_id} not found in KV store")
-                continue
-
-            value = get_result.value
-            documents.append(
-                Document(
-                    id=doc_id,
-                    name=value["name"],
-                    content=value["content"],
-                    meta_data=value["meta_data"],
-                    embedding=value["embedding"],
-                    content_id=value.get("content_id"),
-                )
-            )
-
-        return documents
-
     def drop(self) -> None:
         """Delete the collection from the scope."""
         if self.exists():
@@ -601,24 +493,17 @@ class CouchbaseSearch(VectorDb):
             "content_hash": content_hash,
         }
 
-    def get_count(self) -> int:
-        """Get the count of documents in the Couchbase bucket."""
-        try:
-            search_indexes = self.cluster.search_indexes()
-            if not self.is_global_level_index:
-                search_indexes = self.scope.search_indexes()
-            return search_indexes.get_indexed_documents_count(self.search_index_name)
-        except Exception as e:
-            logger.error(f"Error getting document count: {e}")
-            return 0
-
     def name_exists(self, name: str) -> bool:
         """Check if a document exists in the bucket based on its name."""
         try:
             # Use N1QL query to check if document with given name exists
             query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
             result = self.scope.query(
-                query, QueryOptions(named_parameters={"name": name}, scan_consistency=QueryScanConsistency.REQUEST_PLUS)
+                query,
+                self._apply_query_options(
+                    named_parameters={"name": name},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
             )
             for row in result.rows():
                 return True
@@ -645,8 +530,9 @@ class CouchbaseSearch(VectorDb):
             query = f"SELECT content_hash FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_hash = $content_hash LIMIT 1"
             result = self.scope.query(
                 query,
-                QueryOptions(
-                    named_parameters={"content_hash": content_hash}, scan_consistency=QueryScanConsistency.REQUEST_PLUS
+                self._apply_query_options(
+                    named_parameters={"content_hash": content_hash},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
                 ),
             )
             for row in result.rows():
@@ -656,6 +542,350 @@ class CouchbaseSearch(VectorDb):
             logger.error(f"Error checking document content_hash existence: {e}")
             return False
 
+    def get_supported_search_types(self) -> List[str]:
+        """Get the supported search types for this vector database."""
+        return []  # CouchbaseSearch doesn't use SearchType enum
+
+    def delete_by_id(self, id: str) -> bool:
+        """
+        Delete a document by its ID.
+
+        Args:
+            id (str): The document ID to delete
+
+        Returns:
+            bool: True if document was deleted, False otherwise
+        """
+        try:
+            log_debug(f"Couchbase VectorDB : Deleting document with ID {id}")
+            if not self.id_exists(id):
+                return False
+
+            # Delete by ID using Couchbase collection.delete()
+            self.collection.remove(id)
+            log_info(f"Successfully deleted document with ID {id}")
+            return True
+        except Exception as e:
+            log_info(f"Error deleting document with ID {id}: {e}")
+            return False
+
+    def delete_by_name(self, name: str) -> bool:
+        """
+        Delete documents by name.
+
+        Args:
+            name (str): The document name to delete
+
+        Returns:
+            bool: True if documents were deleted, False otherwise
+        """
+        try:
+            log_debug(f"Couchbase VectorDB : Deleting documents with name {name}")
+
+            query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name"
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters={"name": name},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
+            rows = list(result.rows())
+            doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
+            if not doc_ids:
+                log_info(f"No documents found with name {name} to delete")
+                return False
+
+            try:
+                remove_result = self.collection.remove_multi(doc_ids)
+            except AttributeError:
+                deleted_count = 0
+                for doc_id in doc_ids:
+                    try:
+                        self.collection.remove(doc_id)
+                        deleted_count += 1
+                    except Exception as single_err:
+                        logger.warning(f"Failed to delete document '{doc_id}': {single_err}")
+                log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with name {name} (fallback single deletes)")
+                return deleted_count > 0
+
+            if getattr(remove_result, "all_ok", False):
+                deleted_count = len(doc_ids)
+            else:
+                exceptions = getattr(remove_result, "exceptions", {}) or {}
+                deleted_count = len(doc_ids) - len(exceptions)
+                if exceptions:
+                    logger.warning(f"Partial failures during batch delete for name {name}: {exceptions}")
+
+            log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with name {name}")
+            return deleted_count > 0
+        except Exception as e:
+            log_info(f"Error deleting documents with name {name}: {e}")
+            return False
+
+    def delete_by_metadata(self, metadata: Dict[str, Any]) -> bool:
+        """
+        Delete documents by metadata.
+
+        Args:
+            metadata (Dict[str, Any]): The metadata to match for deletion
+
+        Returns:
+            bool: True if documents were deleted, False otherwise
+        """
+        try:
+            log_debug(f"Couchbase VectorDB : Deleting documents with metadata {metadata}")
+
+            if not metadata:
+                log_info("No metadata provided for deletion")
+                return False
+
+            where_conditions = []
+            named_parameters: Dict[str, Any] = {}
+            for key, value in metadata.items():
+                if isinstance(value, (list, tuple)):
+                    where_conditions.append(
+                        f"(ARRAY_CONTAINS(filters.{key}, $value_{key}) OR ARRAY_CONTAINS(recipes.filters.{key}, $value_{key}))"
+                    )
+                    named_parameters[f"value_{key}"] = value
+                elif isinstance(value, (str, bool, int, float)):
+                    where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
+                    named_parameters[f"value_{key}"] = value
+                elif value is None:
+                    where_conditions.append(f"(filters.{key} IS NULL OR recipes.filters.{key} IS NULL)")
+                else:
+                    where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
+                    named_parameters[f"value_{key}"] = str(value)
+
+            if not where_conditions:
+                log_info("No valid metadata conditions for deletion")
+                return False
+
+            where_clause = " AND ".join(where_conditions)
+            query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE {where_clause}"
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters=named_parameters,
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
+            rows = list(result.rows())
+            doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
+            if not doc_ids:
+                log_info(f"No documents found matching metadata {metadata} to delete")
+                return False
+
+            try:
+                remove_result = self.collection.remove_multi(doc_ids)
+            except AttributeError:
+                deleted_count = 0
+                for doc_id in doc_ids:
+                    try:
+                        self.collection.remove(doc_id)
+                        deleted_count += 1
+                    except Exception as single_err:
+                        logger.warning(f"Failed to delete document '{doc_id}': {single_err}")
+                log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with metadata {metadata} (fallback single deletes)")
+                return deleted_count > 0
+
+            if getattr(remove_result, "all_ok", False):
+                deleted_count = len(doc_ids)
+            else:
+                exceptions = getattr(remove_result, "exceptions", {}) or {}
+                deleted_count = len(doc_ids) - len(exceptions)
+                if exceptions:
+                    logger.warning(f"Partial failures during batch delete for metadata {metadata}: {exceptions}")
+
+            log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with metadata {metadata}")
+            return deleted_count > 0
+        except Exception as e:
+            log_info(f"Error deleting documents with metadata {metadata}: {e}")
+            return False
+
+    def delete_by_content_id(self, content_id: str) -> bool:
+        """
+        Delete documents by content ID.
+
+        Args:
+            content_id (str): The content ID to delete
+
+        Returns:
+            bool: True if documents were deleted, False otherwise
+        """
+        try:
+            log_debug(f"Couchbase VectorDB : Deleting documents with content_id {content_id}")
+
+            query = (
+                f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} "
+                "WHERE content_id = $content_id OR recipes.content_id = $content_id"
+            )
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters={"content_id": content_id},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
+            rows = list(result.rows())
+
+            # Collect IDs to delete
+            doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
+            if not doc_ids:
+                log_info(f"No documents found with content_id {content_id} to delete")
+                return False
+
+            # Use batch removal for efficiency
+            try:
+                remove_result = self.collection.remove_multi(doc_ids)
+            except AttributeError:
+                # Fallback if SDK does not support remove_multi
+                deleted_count = 0
+                for doc_id in doc_ids:
+                    try:
+                        self.collection.remove(doc_id)
+                        deleted_count += 1
+                    except Exception as single_err:
+                        logger.warning(f"Failed to delete document '{doc_id}': {single_err}")
+                log_info(
+                    f"Deleted {deleted_count}/{len(doc_ids)} documents with content_id {content_id} (fallback single deletes)"
+                )
+                return deleted_count > 0
+
+            # Process batch result
+            if getattr(remove_result, "all_ok", False):
+                deleted_count = len(doc_ids)
+            else:
+                exceptions = getattr(remove_result, "exceptions", {}) or {}
+                deleted_count = len(doc_ids) - len(exceptions)
+                if exceptions:
+                    logger.warning(
+                        f"Partial failures during batch delete for content_id {content_id}: {exceptions}"
+                    )
+
+            log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with content_id {content_id}")
+            return deleted_count > 0
+
+        except Exception as e:
+            log_info(f"Error deleting documents with content_id {content_id}: {e}")
+            return False
+
+    def _delete_by_content_hash(self, content_hash: str) -> bool:
+        """
+        Delete documents by content hash.
+
+        Args:
+            content_hash (str): The content hash to delete
+
+        Returns:
+            bool: True if documents were deleted, False otherwise
+        """
+        try:
+            log_debug(f"Couchbase VectorDB : Deleting documents with content_hash {content_hash}")
+
+            query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_hash = $content_hash"
+            result = self.scope.query(
+                query,
+                self._apply_query_options(
+                    named_parameters={"content_hash": content_hash},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
+            )
+            rows = list(result.rows())
+            doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
+            if not doc_ids:
+                log_info(f"No documents found with content_hash {content_hash} to delete")
+                return False
+
+            try:
+                remove_result = self.collection.remove_multi(doc_ids)
+            except AttributeError:
+                deleted_count = 0
+                for doc_id in doc_ids:
+                    try:
+                        self.collection.remove(doc_id)
+                        deleted_count += 1
+                    except Exception as single_err:
+                        logger.warning(f"Failed to delete document '{doc_id}': {single_err}")
+                log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with content_hash {content_hash} (fallback single deletes)")
+                return deleted_count > 0
+
+            if getattr(remove_result, "all_ok", False):
+                deleted_count = len(doc_ids)
+            else:
+                exceptions = getattr(remove_result, "exceptions", {}) or {}
+                deleted_count = len(doc_ids) - len(exceptions)
+                if exceptions:
+                    logger.warning(f"Partial failures during batch delete for content_hash {content_hash}: {exceptions}")
+
+            log_info(f"Deleted {deleted_count}/{len(doc_ids)} documents with content_hash {content_hash}")
+            return deleted_count > 0
+        except Exception as e:
+            log_info(f"Error deleting documents with content_hash {content_hash}: {e}")
+            return False
+
+    def update_metadata(self, content_id: str, metadata: Dict[str, Any]) -> None:
+        """
+        Update the metadata for documents with the given content_id.
+
+        Args:
+            content_id (str): The content ID to update
+            metadata (Dict[str, Any]): The metadata to update
+        """
+        try:
+            # Query for documents with the given content_id
+            query = f"SELECT META().id as doc_id, meta_data, filters FROM `{self.bucket_name}` WHERE content_id = $content_id"
+            result = self.cluster.query(query, content_id=content_id)
+
+            updated_count = 0
+            for row in result:
+                doc_id = row.get("doc_id")
+                current_metadata = row.get("meta_data", {})
+                current_filters = row.get("filters", {})
+
+                # Merge existing metadata with new metadata
+                if isinstance(current_metadata, dict):
+                    updated_metadata = current_metadata.copy()
+                    updated_metadata.update(metadata)
+                else:
+                    updated_metadata = metadata
+
+                # Merge existing filters with new metadata
+                if isinstance(current_filters, dict):
+                    updated_filters = current_filters.copy()
+                    updated_filters.update(metadata)
+                else:
+                    updated_filters = metadata
+
+                # Update the document
+                try:
+                    doc = self.collection.get(doc_id)
+                    doc_content = doc.content_as[dict]
+                    doc_content["meta_data"] = updated_metadata
+                    doc_content["filters"] = updated_filters
+
+                    self.collection.upsert(doc_id, doc_content)
+                    updated_count += 1
+                except Exception as doc_error:
+                    logger.warning(f"Failed to update document {doc_id}: {doc_error}")
+
+            if updated_count == 0:
+                logger.debug(f"No documents found with content_id: {content_id}")
+            else:
+                logger.debug(f"Updated metadata for {updated_count} documents with content_id: {content_id}")
+
+        except Exception as e:
+            logger.error(f"Error updating metadata for content_id '{content_id}': {e}")
+            raise
+ 
+    @abstractmethod
+    def create(self) -> None:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
+        raise NotImplementedError
+    
     # === ASYNC SUPPORT USING acouchbase ===
 
     async def _create_async_cluster_instance(self) -> AsyncCluster:
@@ -697,12 +927,6 @@ class CouchbaseSearch(VectorDb):
             scope = await self.get_async_scope()
             self._async_collection = scope.collection(self.collection_name)
         return self._async_collection
-
-    async def async_create(self) -> None:
-        # FTS index creation is not supported in acouchbase as of now, so fallback to sync for index creation
-        # This is a limitation of the SDK. You may want to document this.
-        await self._async_create_collection_and_scope()
-        await self._async_create_fts_index()
 
     async def _async_create_collection_and_scope(self):
         """
@@ -786,65 +1010,6 @@ class CouchbaseSearch(VectorDb):
                 logger.error(f"Error creating collection '{self.collection_name}': {e}")
                 raise
 
-    async def _get_async_search_indexes_mng(self) -> Union[AsyncSearchIndexManager, AsyncScopeSearchIndexManager]:
-        """Get the async search indexes manager."""
-        if self.is_global_level_index:
-            cluster = await self.get_async_cluster()
-            return cluster.search_indexes()
-        else:
-            scope = await self.get_async_scope()
-            return scope.search_indexes()
-
-    async def _async_create_fts_index(self):
-        """Create a FTS index on the collection if it doesn't exist."""
-        async_search_mng = await self._get_async_search_indexes_mng()
-        try:
-            # Check if index exists and handle string index name
-            await async_search_mng.get_index(self.search_index_name)
-            if not self.overwrite:
-                return
-        except Exception:
-            if self.search_index_definition is None:
-                raise ValueError(f"Index '{self.search_index_name}' does not exist")
-
-        # Create or update index
-        try:
-            if self.overwrite:
-                try:
-                    logger.info(f"Dropping existing FTS index '{self.search_index_name}'")
-                    await async_search_mng.drop_index(self.search_index_name)
-                except SearchIndexNotFoundException:
-                    logger.warning(f"Index '{self.search_index_name}' does not exist")
-                except Exception as e:
-                    logger.warning(f"Error dropping index (may not exist): {e}")
-
-            await async_search_mng.upsert_index(self.search_index_definition)
-            logger.info(f"Created FTS index '{self.search_index_name}'")
-
-            if self.wait_until_index_ready:
-                await self._async_wait_for_index_ready()
-
-        except Exception as e:
-            logger.error(f"Error creating FTS index '{self.search_index_name}': {e}")
-            raise
-
-    async def _async_wait_for_index_ready(self):
-        """Wait until the FTS index is ready."""
-        start_time = time.time()
-        async_search_mng = await self._get_async_search_indexes_mng()
-        while True:
-            try:
-                count = await async_search_mng.get_indexed_documents_count(self.search_index_name)
-                if count > -1:
-                    logger.info(f"FTS index '{self.search_index_name}' is ready")
-                    break
-                # logger.info(f"FTS index '{self.search_index_name}' is not ready yet status: {index['status']}")
-            except Exception as e:
-                if time.time() - start_time > self.wait_until_index_ready:
-                    logger.error(f"Error checking index status: {e}")
-                    raise TimeoutError("Timeout waiting for FTS index to become ready")
-                await asyncio.sleep(1)
-
     async def async_id_exists(self, id: str) -> bool:
         try:
             async_collection_instance = await self.get_async_collection()
@@ -861,7 +1026,11 @@ class CouchbaseSearch(VectorDb):
             query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
             async_scope_instance = await self.get_async_scope()
             result = async_scope_instance.query(
-                query, QueryOptions(named_parameters={"name": name}, scan_consistency=QueryScanConsistency.REQUEST_PLUS)
+                query,
+                self._apply_query_options(
+                    named_parameters={"name": name},
+                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
+                ),
             )
             async for row in result.rows():
                 return True
@@ -1067,6 +1236,321 @@ class CouchbaseSearch(VectorDb):
         logger.info(f"[async] Finished processing {processed_doc_count} documents for upsert.")
         logger.info(f"[async] Total successfully upserted: {total_upserted_count}, Total failed: {total_failed_count}.")
 
+    async def async_drop(self) -> None:
+        if await self.async_exists():
+            try:
+                async_bucket_instance = await self.get_async_bucket()
+                await async_bucket_instance.collections().drop_collection(
+                    collection_name=self.collection_name, scope_name=self.scope_name
+                )
+                logger.info(f"[async] Collection '{self.collection_name}' dropped successfully.")
+            except Exception as e:
+                logger.error(f"[async] Error dropping collection '{self.collection_name}': {e}")
+                raise
+
+    async def async_exists(self) -> bool:
+        try:
+            async_bucket_instance = await self.get_async_bucket()
+            scopes = await async_bucket_instance.collections().get_all_scopes()
+            for scope in scopes:
+                if scope.name == self.scope_name:
+                    for collection in scope.collections:
+                        if collection.name == self.collection_name:
+                            return True
+            return False
+        except Exception:
+            return False
+
+    @abstractmethod
+    async def async_search(
+        self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Document]:
+        raise NotImplementedError
+    
+    @abstractmethod
+    async def async_create(self) -> None:
+        raise NotImplementedError
+    
+class CouchbaseSearch(CouchbaseBase):
+    """
+    Couchbase Vector Database implementation with FTS (Full Text Search) index support.
+    """
+
+    def __init__(   
+        self,
+        bucket_name: str,
+        scope_name: str,
+        collection_name: str,
+        couchbase_connection_string: str,
+        cluster_options: ClusterOptions,
+        search_index: Union[str, SearchIndex],
+        embedder: Embedder = OpenAIEmbedder(),
+        overwrite: bool = False,
+        is_global_level_index: bool = False,
+        wait_until_index_ready: float = 0,
+        batch_limit: int = 500,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        **kwargs,
+    ):
+        """
+        Initialize the CouchbaseSearch with Couchbase connection details.
+
+        Args:
+            bucket_name (str): Name of the Couchbase bucket.
+            scope_name (str): Name of the scope within the bucket.
+            collection_name (str): Name of the collection within the scope.
+            name (Optional[str]): Name of the vector database.
+            description (Optional[str]): Description of the vector database.
+            couchbase_connection_string (str): Couchbase connection string.
+            cluster_options (ClusterOptions): Options for configuring the Couchbase cluster connection.
+            search_index (Union[str, SearchIndex], optional): Search index configuration, either as index name or SearchIndex definition.
+            embedder (Embedder): Embedder instance for generating embeddings. Defaults to OpenAIEmbedder.
+            overwrite (bool): Whether to overwrite existing collection. Defaults to False.
+            wait_until_index_ready (float, optional): Time in seconds to wait until the index is ready. Defaults to 0.
+            batch_limit (int, optional): Maximum number of documents to process in a single batch (applies to both sync and async operations). Defaults to 500.
+            **kwargs: Additional arguments for Couchbase connection.
+        """
+        super().__init__(
+            bucket_name=bucket_name,
+            scope_name=scope_name,
+            collection_name=collection_name,
+            couchbase_connection_string=couchbase_connection_string,
+            cluster_options=cluster_options,
+            embedder=embedder,
+            overwrite=overwrite,
+            batch_limit=batch_limit,
+            name=name,
+            description=description,
+        )
+        self.is_global_level_index = is_global_level_index
+        self.wait_until_index_ready = wait_until_index_ready
+
+        self.kwargs = kwargs
+        if isinstance(search_index, str):
+            self.search_index_name = search_index
+            self.search_index_definition = None
+        else:
+            self.search_index_name = search_index.name
+            self.search_index_definition = search_index
+
+    def _search_indexes_mng(self) -> Union[SearchIndexManager, ScopeSearchIndexManager]:
+        """Get the search indexes manager."""
+        if self.is_global_level_index:
+            return self.cluster.search_indexes()
+        else:
+            return self.scope.search_indexes()
+
+    def _create_fts_index(self):
+        """Create a FTS index on the collection if it doesn't exist."""
+        try:
+            # Check if index exists and handle string index name
+            self._search_indexes_mng().get_index(self.search_index_name)
+            if not self.overwrite:
+                return
+        except Exception:
+            if self.search_index_definition is None:
+                raise ValueError(f"Index '{self.search_index_name}' does not exist")
+
+        # Create or update index
+        try:
+            if self.overwrite:
+                try:
+                    logger.info(f"Dropping existing FTS index '{self.search_index_name}'")
+                    self._search_indexes_mng().drop_index(self.search_index_name)
+                except SearchIndexNotFoundException:
+                    logger.warning(f"Index '{self.search_index_name}' does not exist")
+                except Exception as e:
+                    logger.warning(f"Error dropping index (may not exist): {e}")
+
+            self._search_indexes_mng().upsert_index(self.search_index_definition)
+            logger.info(f"Created FTS index '{self.search_index_name}'")
+
+            if self.wait_until_index_ready:
+                self._wait_for_index_ready()
+
+        except Exception as e:
+            logger.error(f"Error creating FTS index '{self.search_index_name}': {e}")
+            raise
+
+    def _wait_for_index_ready(self):
+        """Wait until the FTS index is ready."""
+        start_time = time.time()
+        while True:
+            try:
+                count = self._search_indexes_mng().get_indexed_documents_count(self.search_index_name)
+                if count > -1:
+                    logger.info(f"FTS index '{self.search_index_name}' is ready")
+                    break
+                # logger.info(f"FTS index '{self.search_index_name}' is not ready yet status: {index['status']}")
+            except Exception as e:
+                if time.time() - start_time > self.wait_until_index_ready:
+                    logger.error(f"Error checking index status: {e}")
+                    raise TimeoutError("Timeout waiting for FTS index to become ready")
+                time.sleep(1)
+
+    def create(self) -> None:
+        """Create the collection and FTS index if they don't exist."""
+        self._create_collection_and_scope()
+        self._create_fts_index()
+
+    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
+        """Search the Couchbase bucket for documents relevant to the query."""
+        query_embedding = self.embedder.get_embedding(query)
+        if query_embedding is None:
+            logger.error(f"Failed to generate embedding for query: {query}")
+            return []
+
+        try:
+            # Implement vector search using Couchbase FTS
+            vector_search = VectorSearch.from_vector_query(
+                VectorQuery(field_name="embedding", vector=query_embedding, num_candidates=limit)
+            )
+            request = SearchRequest.create(vector_search)
+
+            # Prepare the options dictionary
+            options_dict = {"limit": limit, "fields": ["*"]}
+            if filters:
+                options_dict["raw"] = filters
+
+            search_args = {
+                "index": self.search_index_name,
+                "request": request,
+                "options": SearchOptions(**options_dict),  # Construct SearchOptions with the dictionary
+            }
+
+            if self.is_global_level_index:
+                results = self.cluster.search(**search_args)
+            else:
+                results = self.scope.search(**search_args)
+
+            return self.__get_doc_from_kv(results)
+        except Exception as e:
+            logger.error(f"Error during search: {e}")
+            raise
+
+    def __get_doc_from_kv(self, response: SearchResult) -> List[Document]:
+        """
+        Convert search results to Document objects by fetching full documents from KV store.
+
+        Args:
+            response: SearchResult from Couchbase search query
+
+        Returns:
+            List of Document objects
+        """
+        documents: List[Document] = []
+        search_hits = [(doc.id, doc.score) for doc in response.rows()]
+
+        if not search_hits:
+            return documents
+
+        # Fetch documents from KV store
+        ids = [hit[0] for hit in search_hits]
+        kv_response = self.collection.get_multi(keys=ids)
+
+        if not kv_response.all_ok:
+            raise Exception(f"Failed to get documents from KV store: {kv_response.exceptions}")
+
+        # Convert results to Documents
+        for doc_id, score in search_hits:
+            get_result = kv_response.results.get(doc_id)
+            if get_result is None or not get_result.success:
+                logger.warning(f"Document {doc_id} not found in KV store")
+                continue
+
+            value = get_result.value
+            documents.append(
+                Document(
+                    id=doc_id,
+                    name=value["name"],
+                    content=value["content"],
+                    meta_data=value["meta_data"],
+                    embedding=value["embedding"],
+                    content_id=value.get("content_id"),
+                )
+            )
+
+        return documents
+
+    def get_count(self) -> int:
+        """Get the count of documents in the Couchbase bucket."""
+        try:
+            search_indexes = self.cluster.search_indexes()
+            if not self.is_global_level_index:
+                search_indexes = self.scope.search_indexes()
+            return search_indexes.get_indexed_documents_count(self.search_index_name)
+        except Exception as e:
+            logger.error(f"Error getting document count: {e}")
+            return 0
+
+    # === ASYNC SUPPORT USING acouchbase ===
+
+    async def async_create(self) -> None:
+        # FTS index creation is not supported in acouchbase as of now, so fallback to sync for index creation
+        # This is a limitation of the SDK. You may want to document this.
+        await self._async_create_collection_and_scope()
+        await self._async_create_fts_index()
+
+    async def _get_async_search_indexes_mng(self) -> Union[AsyncSearchIndexManager, AsyncScopeSearchIndexManager]:
+        """Get the async search indexes manager."""
+        if self.is_global_level_index:
+            cluster = await self.get_async_cluster()
+            return cluster.search_indexes()
+        else:
+            scope = await self.get_async_scope()
+            return scope.search_indexes()
+
+    async def _async_create_fts_index(self):
+        """Create a FTS index on the collection if it doesn't exist."""
+        async_search_mng = await self._get_async_search_indexes_mng()
+        try:
+            # Check if index exists and handle string index name
+            await async_search_mng.get_index(self.search_index_name)
+            if not self.overwrite:
+                return
+        except Exception:
+            if self.search_index_definition is None:
+                raise ValueError(f"Index '{self.search_index_name}' does not exist")
+
+        # Create or update index
+        try:
+            if self.overwrite:
+                try:
+                    logger.info(f"Dropping existing FTS index '{self.search_index_name}'")
+                    await async_search_mng.drop_index(self.search_index_name)
+                except SearchIndexNotFoundException:
+                    logger.warning(f"Index '{self.search_index_name}' does not exist")
+                except Exception as e:
+                    logger.warning(f"Error dropping index (may not exist): {e}")
+
+            await async_search_mng.upsert_index(self.search_index_definition)
+            logger.info(f"Created FTS index '{self.search_index_name}'")
+
+            if self.wait_until_index_ready:
+                await self._async_wait_for_index_ready()
+
+        except Exception as e:
+            logger.error(f"Error creating FTS index '{self.search_index_name}': {e}")
+            raise
+
+    async def _async_wait_for_index_ready(self):
+        """Wait until the FTS index is ready."""
+        start_time = time.time()
+        async_search_mng = await self._get_async_search_indexes_mng()
+        while True:
+            try:
+                count = await async_search_mng.get_indexed_documents_count(self.search_index_name)
+                if count > -1:
+                    logger.info(f"FTS index '{self.search_index_name}' is ready")
+                    break
+                # logger.info(f"FTS index '{self.search_index_name}' is not ready yet status: {index['status']}")
+            except Exception as e:
+                if time.time() - start_time > self.wait_until_index_ready:
+                    logger.error(f"Error checking index status: {e}")
+                    raise TimeoutError("Timeout waiting for FTS index to become ready")
+                await asyncio.sleep(1)
+
     async def async_search(
         self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
     ) -> List[Document]:
@@ -1103,31 +1587,6 @@ class CouchbaseSearch(VectorDb):
         except Exception as e:
             logger.error(f"[async] Error during search: {e}")
             raise
-
-    async def async_drop(self) -> None:
-        if await self.async_exists():
-            try:
-                async_bucket_instance = await self.get_async_bucket()
-                await async_bucket_instance.collections().drop_collection(
-                    collection_name=self.collection_name, scope_name=self.scope_name
-                )
-                logger.info(f"[async] Collection '{self.collection_name}' dropped successfully.")
-            except Exception as e:
-                logger.error(f"[async] Error dropping collection '{self.collection_name}': {e}")
-                raise
-
-    async def async_exists(self) -> bool:
-        try:
-            async_bucket_instance = await self.get_async_bucket()
-            scopes = await async_bucket_instance.collections().get_all_scopes()
-            for scope in scopes:
-                if scope.name == self.scope_name:
-                    for collection in scope.collections:
-                        if collection.name == self.collection_name:
-                            return True
-            return False
-        except Exception:
-            return False
 
     async def __async_get_doc_from_kv(self, response: AsyncSearchIndex) -> List[Document]:
         """
@@ -1195,239 +1654,261 @@ class CouchbaseSearch(VectorDb):
 
         return documents
 
-    def delete_by_id(self, id: str) -> bool:
-        """
-        Delete a document by its ID.
+class QueryVectorSearchType(str, Enum):
+    """Enum for search types supported by Couchbase GSI."""
 
-        Args:
-            id (str): The document ID to delete
+    ANN = "ANN"
+    KNN = "KNN"
 
-        Returns:
-            bool: True if document was deleted, False otherwise
-        """
-        try:
-            log_debug(f"Couchbase VectorDB : Deleting document with ID {id}")
-            if not self.id_exists(id):
-                return False
 
-            # Delete by ID using Couchbase collection.delete()
-            self.collection.remove(id)
-            log_info(f"Successfully deleted document with ID {id}")
-            return True
-        except Exception as e:
-            log_info(f"Error deleting document with ID {id}: {e}")
-            return False
+class QueryVectorSearchSimilarity(str, Enum):
+    """Enum for similarity metrics supported by Couchbase GSI."""
 
-    def delete_by_name(self, name: str) -> bool:
-        """
-        Delete documents by name.
+    COSINE = "COSINE"
+    DOT = "DOT"
+    L2 = "L2"
+    EUCLIDEAN = "EUCLIDEAN"
+    L2_SQUARED = "L2_SQUARED"
+    EUCLIDEAN_SQUARED = "EUCLIDEAN_SQUARED"
 
-        Args:
-            name (str): The document name to delete
 
-        Returns:
-            bool: True if documents were deleted, False otherwise
-        """
-        try:
-            log_debug(f"Couchbase VectorDB : Deleting documents with name {name}")
+class CouchbaseQuery(CouchbaseBase):
+    def __init__(self,
 
-            query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name"
-            result = self.scope.query(
-                query, QueryOptions(named_parameters={"name": name}, scan_consistency=QueryScanConsistency.REQUEST_PLUS)
+        bucket_name: str,
+        scope_name: str,
+        collection_name: str,
+        couchbase_connection_string: str,
+        search_type: Union[QueryVectorSearchType, str],
+        similarity: Union[QueryVectorSearchSimilarity, str],
+        n_probes: Optional[int],
+        cluster_options: ClusterOptions,
+        embedder: Embedder = OpenAIEmbedder(),
+        embedding_key: str = "embedding",
+        overwrite: bool = False,
+        batch_limit: int = 500,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        **kwargs,
+    ):
+        super().__init__(
+            bucket_name=bucket_name,
+            scope_name=scope_name,
+            collection_name=collection_name,
+            couchbase_connection_string=couchbase_connection_string,
+            cluster_options=cluster_options,
+            embedder=embedder,
+            overwrite=overwrite,
+            batch_limit=batch_limit,
+            name=name,
+            description=description,
+        )
+        if isinstance(search_type, str):
+            self._search_type = QueryVectorSearchType(search_type)
+        else:
+            self._search_type = search_type
+        self._similarity = (
+            similarity.upper()
+            if isinstance(similarity, str)
+            else (
+                similarity.value
+                if isinstance(similarity, QueryVectorSearchSimilarity)
+                else None
             )
-            rows = list(result.rows())  # Collect once
-
-            for row in rows:
-                self.collection.remove(row.get("doc_id"))
-            log_info(f"Deleted {len(rows)} documents with name {name}")
-            return True
-
-        except Exception as e:
-            log_info(f"Error deleting documents with name {name}: {e}")
-            return False
-
-    def delete_by_metadata(self, metadata: Dict[str, Any]) -> bool:
+        )
+        self._nprobes = n_probes
+        self._embedding_key = embedding_key
+    
+    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
+        query_embedding = self.embedder.get_embedding(query)
+        if query_embedding is None:
+            logger.error(f"Failed to generate embedding for query: {query}")
+            return []
+        
+        query_context = (
+            f"`{self.bucket_name}`.`{self.scope_name}`.`{self.collection_name}`"
+        )
+        
+        # Convert embedding to string representation for query
+        query_vector_str = str(query_embedding)
+        
+        # Select all document fields plus the document ID
+        fields = "d.*, META(d).id as id"
+        
+        nprobes = self._nprobes
+        
+        # Determine the appropriate distance function based on search type
+        if self._search_type == QueryVectorSearchType.ANN:
+            nprobes_exp = f", {nprobes}" if nprobes else ""
+            distance_function_exp = f"APPROX_VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}'{nprobes_exp})"
+        else:
+            distance_function_exp = f"VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}')"
+        
+        # Build the SQL++ query
+        query_str = f"""
+        SELECT {fields}, {distance_function_exp} as score
+        FROM {query_context} d
+        ORDER BY score
+        LIMIT {limit}
         """
-        Delete documents by metadata.
-
-        Args:
-            metadata (Dict[str, Any]): The metadata to match for deletion
-
-        Returns:
-            bool: True if documents were deleted, False otherwise
-        """
+        
         try:
-            log_debug(f"Couchbase VectorDB : Deleting documents with metadata {metadata}")
-
-            if not metadata:
-                log_info("No metadata provided for deletion")
-                return False
-
-            # Build WHERE clause for metadata matching
-            where_conditions = []
-            named_parameters: Dict[str, Any] = {}
-
-            for key, value in metadata.items():
-                if isinstance(value, (list, tuple)):
-                    # For array values, use ARRAY_CONTAINS
-                    where_conditions.append(
-                        f"(ARRAY_CONTAINS(filters.{key}, $value_{key}) OR ARRAY_CONTAINS(recipes.filters.{key}, $value_{key}))"
+            # Execute the query
+            result = self.cluster.query(query_str)
+            
+            documents: List[Document] = []
+            
+            # Process results
+            for row in result.rows():
+                doc_id = row.get("id", "")
+                name = row.get("name", "")
+                content = row.get("content", "")
+                meta_data = row.get("meta_data", {})
+                embedding = row.get(self._embedding_key, [])
+                content_id = row.get("content_id")
+                
+                documents.append(
+                    Document(
+                        id=doc_id,
+                        name=name,
+                        content=content,
+                        meta_data=meta_data,
+                        embedding=embedding,
+                        content_id=content_id,
                     )
-                    named_parameters[f"value_{key}"] = value
-                elif isinstance(value, str):
-                    where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
-                    named_parameters[f"value_{key}"] = value
-                elif isinstance(value, bool):
-                    where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
-                    named_parameters[f"value_{key}"] = value
-                elif isinstance(value, (int, float)):
-                    where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
-                    named_parameters[f"value_{key}"] = value
-                elif value is None:
-                    where_conditions.append(f"(filters.{key} IS NULL OR recipes.filters.{key} IS NULL)")
-                else:
-                    # For other types, convert to string
-                    where_conditions.append(f"(filters.{key} = $value_{key} OR recipes.filters.{key} = $value_{key})")
-                    named_parameters[f"value_{key}"] = str(value)
-
-            if not where_conditions:
-                log_info("No valid metadata conditions for deletion")
-                return False
-
-            where_clause = " AND ".join(where_conditions)
-            query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE {where_clause}"
-
-            result = self.scope.query(
-                query,
-                QueryOptions(named_parameters=named_parameters, scan_consistency=QueryScanConsistency.REQUEST_PLUS),
-            )
-            rows = list(result.rows())  # Collect once
-
-            for row in rows:
-                self.collection.remove(row.get("doc_id"))
-            log_info(f"Deleted {len(rows)} documents with metadata {metadata}")
-            return True
-
+                )
+            
+            return documents
+            
         except Exception as e:
-            log_info(f"Error deleting documents with metadata {metadata}: {e}")
-            return False
-
-    def delete_by_content_id(self, content_id: str) -> bool:
-        """
-        Delete documents by content ID.
-
-        Args:
-            content_id (str): The content ID to delete
-
-        Returns:
-            bool: True if documents were deleted, False otherwise
-        """
-        try:
-            log_debug(f"Couchbase VectorDB : Deleting documents with content_id {content_id}")
-
-            query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_id = $content_id OR recipes.content_id = $content_id"
-            result = self.scope.query(
-                query,
-                QueryOptions(
-                    named_parameters={"content_id": content_id}, scan_consistency=QueryScanConsistency.REQUEST_PLUS
-                ),
-            )
-            rows = list(result.rows())  # Collect once
-
-            for row in rows:
-                self.collection.remove(row.get("doc_id"))
-            log_info(f"Deleted {len(rows)} documents with content_id {content_id}")
-            return True
-
-        except Exception as e:
-            log_info(f"Error deleting documents with content_id {content_id}: {e}")
-            return False
-
-    def _delete_by_content_hash(self, content_hash: str) -> bool:
-        """
-        Delete documents by content hash.
-
-        Args:
-            content_hash (str): The content hash to delete
-
-        Returns:
-            bool: True if documents were deleted, False otherwise
-        """
-        try:
-            log_debug(f"Couchbase VectorDB : Deleting documents with content_hash {content_hash}")
-
-            query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_hash = $content_hash"
-            result = self.scope.query(
-                query,
-                QueryOptions(
-                    named_parameters={"content_hash": content_hash}, scan_consistency=QueryScanConsistency.REQUEST_PLUS
-                ),
-            )
-            rows = list(result.rows())  # Collect once
-
-            for row in rows:
-                self.collection.remove(row.get("doc_id"))
-            log_info(f"Deleted {len(rows)} documents with content_hash {content_hash}")
-            return True
-
-        except Exception as e:
-            log_info(f"Error deleting documents with content_hash {content_hash}: {e}")
-            return False
-
-    def update_metadata(self, content_id: str, metadata: Dict[str, Any]) -> None:
-        """
-        Update the metadata for documents with the given content_id.
-
-        Args:
-            content_id (str): The content ID to update
-            metadata (Dict[str, Any]): The metadata to update
-        """
-        try:
-            # Query for documents with the given content_id
-            query = f"SELECT META().id as doc_id, meta_data, filters FROM `{self.bucket_name}` WHERE content_id = $content_id"
-            result = self.cluster.query(query, content_id=content_id)
-
-            updated_count = 0
-            for row in result:
-                doc_id = row.get("doc_id")
-                current_metadata = row.get("meta_data", {})
-                current_filters = row.get("filters", {})
-
-                # Merge existing metadata with new metadata
-                if isinstance(current_metadata, dict):
-                    updated_metadata = current_metadata.copy()
-                    updated_metadata.update(metadata)
-                else:
-                    updated_metadata = metadata
-
-                # Merge existing filters with new metadata
-                if isinstance(current_filters, dict):
-                    updated_filters = current_filters.copy()
-                    updated_filters.update(metadata)
-                else:
-                    updated_filters = metadata
-
-                # Update the document
-                try:
-                    doc = self.collection.get(doc_id)
-                    doc_content = doc.content_as[dict]
-                    doc_content["meta_data"] = updated_metadata
-                    doc_content["filters"] = updated_filters
-
-                    self.collection.upsert(doc_id, doc_content)
-                    updated_count += 1
-                except Exception as doc_error:
-                    logger.warning(f"Failed to update document {doc_id}: {doc_error}")
-
-            if updated_count == 0:
-                logger.debug(f"No documents found with content_id: {content_id}")
-            else:
-                logger.debug(f"Updated metadata for {updated_count} documents with content_id: {content_id}")
-
-        except Exception as e:
-            logger.error(f"Error updating metadata for content_id '{content_id}': {e}")
+            logger.error(f"Error during vector search: {e}")
             raise
+    
+    def create(self) -> None:
+        """Create the collection and scope if they don't exist."""
+        self._create_collection_and_scope()
+        logger.info(f"CouchbaseQuery vector store created successfully for collection '{self.collection_name}'")
+    
+    async def async_search(
+        self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Document]:
+        """Async version of search using async query execution."""
+        # Generate embedding asynchronously if the embedder supports it
+        if hasattr(self.embedder, 'async_get_embedding'):
+            query_embedding = await self.embedder.async_get_embedding(query)
+        else:
+            query_embedding = self.embedder.get_embedding(query)
+            
+        if query_embedding is None:
+            logger.error(f"[async] Failed to generate embedding for query: {query}")
+            return []
+        
+        query_context = (
+            f"`{self.bucket_name}`.`{self.scope_name}`.`{self.collection_name}`"
+        )
+        
+        # Convert embedding to string representation for query
+        query_vector_str = str(query_embedding)
+        
+        # Select all document fields plus the document ID
+        fields = "d.*, META(d).id as id"
+        
+        nprobes = self._nprobes
+        
+        # Determine the appropriate distance function based on search type
+        if self._search_type == QueryVectorSearchType.ANN:
+            nprobes_exp = f", {nprobes}" if nprobes else ""
+            distance_function_exp = f"APPROX_VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}'{nprobes_exp})"
+        else:
+            distance_function_exp = f"VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}')"
+        
+        # Build the SQL++ query
+        query_str = f"""
+        SELECT {fields}, {distance_function_exp} as score
+        FROM {query_context} d
+        ORDER BY score
+        LIMIT {limit}
+        """
+        
+        try:
+            # Execute the query using async cluster
+            async_cluster_instance = await self.get_async_cluster()
+            raw_result = async_cluster_instance.query(query_str)
 
-    def get_supported_search_types(self) -> List[str]:
-        """Get the supported search types for this vector database."""
-        return []  # CouchbaseSearch doesn't use SearchType enum
+            # Support both: method returns immediate QueryResult or a coroutine (AsyncMock in tests)
+            result = await raw_result if inspect.isawaitable(raw_result) else raw_result
+
+            documents: List[Document] = []
+
+            # Obtain rows iterable/generator
+            rows_source = None
+            if hasattr(result, "rows"):
+                rows_attr = result.rows
+                # If it's callable (method or async gen func), invoke it
+                rows_source = rows_attr() if callable(rows_attr) else rows_attr
+            else:
+                logger.warning("[async] Query result object has no 'rows' attribute")
+                return documents
+
+            # If the rows_source is awaitable but not an async iterator yet, await it
+            if inspect.isawaitable(rows_source) and not hasattr(rows_source, "__aiter"):
+                rows_source = await rows_source
+
+            # Iterate over async rows if possible (async generator / async iterator), else fall back to sync iteration.
+            # Some async generator objects from tests were not passing the hasattr(rows_source, "__aiter") check reliably,
+            # so we broaden detection to include inspect.isasyncgen which is explicit for async generators.
+            if inspect.isasyncgen(rows_source) or hasattr(rows_source, "__aiter"):
+                async for row in rows_source:
+                    try:
+                        doc_id = row.get("id")
+                        name = row.get("name", "")
+                        content = row.get("content", "")
+                        meta_data = row.get("meta_data", {})
+                        embedding = row.get("embedding", [])
+                        content_id = row.get("content_id")
+                        documents.append(
+                            Document(
+                                id=doc_id,
+                                name=name,
+                                content=content,
+                                meta_data=meta_data,
+                                embedding=embedding,
+                                content_id=content_id,
+                            )
+                        )
+                    except Exception as row_err:
+                        logger.warning(f"[async] Error processing search result row: {row_err}")
+                        continue
+            else:  # Synchronous iterable fallback (unlikely for acouchbase, but safe for mocks)
+                for row in rows_source:
+                    try:
+                        doc_id = row.get("id")
+                        name = row.get("name", "")
+                        content = row.get("content", "")
+                        meta_data = row.get("meta_data", {})
+                        embedding = row.get("embedding", [])
+                        content_id = row.get("content_id")
+                        documents.append(
+                            Document(
+                                id=doc_id,
+                                name=name,
+                                content=content,
+                                meta_data=meta_data,
+                                embedding=embedding,
+                                content_id=content_id,
+                            )
+                        )
+                    except Exception as row_err:
+                        logger.warning(f"[async] Error processing search result row (sync fallback): {row_err}")
+                        continue
+
+            return documents
+
+        except Exception as e:
+            logger.error(f"[async] Error during vector search: {e}")
+            raise
+    
+    async def async_create(self) -> None:
+        """Async version of create."""
+        await self._async_create_collection_and_scope()
+        logger.info(f"[async] CouchbaseQuery vector store created successfully for collection '{self.collection_name}'")

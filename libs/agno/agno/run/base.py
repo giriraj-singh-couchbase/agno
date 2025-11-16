@@ -1,15 +1,27 @@
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
+from agno.filters import FilterExpr
 from agno.media import Audio, Image, Video
 from agno.models.message import Citations, Message, MessageReferences
 from agno.models.metrics import Metrics
-from agno.models.response import ToolExecution
 from agno.reasoning.step import ReasoningStep
 from agno.utils.log import log_error
+
+
+@dataclass
+class RunContext:
+    run_id: str
+    session_id: str
+    user_id: Optional[str] = None
+
+    dependencies: Optional[Dict[str, Any]] = None
+    knowledge_filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
+    metadata: Optional[Dict[str, Any]] = None
+    session_state: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -98,6 +110,8 @@ class BaseRunOutputEvent:
             _dict["content"] = self.content.model_dump(exclude_none=True)
 
         if hasattr(self, "tools") and self.tools is not None:
+            from agno.models.response import ToolExecution
+
             _dict["tools"] = []
             for tool in self.tools:
                 if isinstance(tool, ToolExecution):
@@ -106,6 +120,8 @@ class BaseRunOutputEvent:
                     _dict["tools"].append(tool)
 
         if hasattr(self, "tool") and self.tool is not None:
+            from agno.models.response import ToolExecution
+
             if isinstance(self.tool, ToolExecution):
                 _dict["tool"] = self.tool.to_dict()
             else:
@@ -139,6 +155,8 @@ class BaseRunOutputEvent:
     def from_dict(cls, data: Dict[str, Any]):
         tool = data.pop("tool", None)
         if tool:
+            from agno.models.response import ToolExecution
+
             data["tool"] = ToolExecution.from_dict(tool)
 
         images = data.pop("images", None)

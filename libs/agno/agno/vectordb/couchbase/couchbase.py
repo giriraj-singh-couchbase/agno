@@ -6,10 +6,11 @@ from datetime import timedelta
 from typing import Any, Dict, List, Optional, Union
 import inspect
 
+from agno.filters import FilterExpr
 from agno.knowledge.document import Document
 from agno.knowledge.embedder import Embedder
 from agno.knowledge.embedder.openai import OpenAIEmbedder
-from agno.utils.log import log_debug, log_info, logger
+from agno.utils.log import log_debug, log_info, log_warning, logger
 from agno.vectordb.base import VectorDb
 
 try:
@@ -428,6 +429,90 @@ class CouchbaseBase(VectorDb):
         logger.info(f"Total successfully upserted: {total_upserted_count}.")
         if errors_occurred:
             logger.warning("Some errors occurred during the upsert operation. Please check logs for details.")
+
+    def search(
+        self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
+    ) -> List[Document]:
+        if isinstance(filters, List):
+            log_warning("Filter Expressions are not yet supported in Couchbase. No filters will be applied.")
+            filters = None
+        """Search the Couchbase bucket for documents relevant to the query."""
+        query_embedding = self.embedder.get_embedding(query)
+        if query_embedding is None:
+            logger.error(f"Failed to generate embedding for query: {query}")
+            return []
+
+        try:
+            # Implement vector search using Couchbase FTS
+            vector_search = VectorSearch.from_vector_query(
+                VectorQuery(field_name="embedding", vector=query_embedding, num_candidates=limit)
+            )
+            request = SearchRequest.create(vector_search)
+
+            # Prepare the options dictionary
+            options_dict = {"limit": limit, "fields": ["*"]}
+            if filters:
+                options_dict["raw"] = filters
+
+            search_args = {
+                "index": self.search_index_name,
+                "request": request,
+                "options": SearchOptions(**options_dict),  # Construct SearchOptions with the dictionary
+            }
+
+            if self.is_global_level_index:
+                results = self.cluster.search(**search_args)
+            else:
+                results = self.scope.search(**search_args)
+
+            return self.__get_doc_from_kv(results)
+        except Exception as e:
+            logger.error(f"Error during search: {e}")
+            raise
+
+    def __get_doc_from_kv(self, response: SearchResult) -> List[Document]:
+        """
+        Convert search results to Document objects by fetching full documents from KV store.
+
+        Args:
+            response: SearchResult from Couchbase search query
+
+        Returns:
+            List of Document objects
+        """
+        documents: List[Document] = []
+        search_hits = [(doc.id, doc.score) for doc in response.rows()]
+
+        if not search_hits:
+            return documents
+
+        # Fetch documents from KV store
+        ids = [hit[0] for hit in search_hits]
+        kv_response = self.collection.get_multi(keys=ids)
+
+        if not kv_response.all_ok:
+            raise Exception(f"Failed to get documents from KV store: {kv_response.exceptions}")
+
+        # Convert results to Documents
+        for doc_id, score in search_hits:
+            get_result = kv_response.results.get(doc_id)
+            if get_result is None or not get_result.success:
+                logger.warning(f"Document {doc_id} not found in KV store")
+                continue
+
+            value = get_result.value
+            documents.append(
+                Document(
+                    id=doc_id,
+                    name=value["name"],
+                    content=value["content"],
+                    meta_data=value["meta_data"],
+                    embedding=value["embedding"],
+                    content_id=value.get("content_id"),
+                )
+            )
+
+        return documents
 
     def drop(self) -> None:
         """Delete the collection from the scope."""
@@ -1552,8 +1637,11 @@ class CouchbaseSearch(CouchbaseBase):
                 await asyncio.sleep(1)
 
     async def async_search(
-        self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
+        self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
     ) -> List[Document]:
+        if isinstance(filters, List):
+            log_warning("Filter Expressions are not yet supported in Couchbase. No filters will be applied.")
+            filters = None
         query_embedding = self.embedder.get_embedding(query)
         if query_embedding is None:
             logger.error(f"[async] Failed to generate embedding for query: {query}")

@@ -430,46 +430,6 @@ class CouchbaseBase(VectorDb):
         if errors_occurred:
             logger.warning("Some errors occurred during the upsert operation. Please check logs for details.")
 
-    def search(
-        self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
-    ) -> List[Document]:
-        if isinstance(filters, List):
-            log_warning("Filter Expressions are not yet supported in Couchbase. No filters will be applied.")
-            filters = None
-        """Search the Couchbase bucket for documents relevant to the query."""
-        query_embedding = self.embedder.get_embedding(query)
-        if query_embedding is None:
-            logger.error(f"Failed to generate embedding for query: {query}")
-            return []
-
-        try:
-            # Implement vector search using Couchbase FTS
-            vector_search = VectorSearch.from_vector_query(
-                VectorQuery(field_name="embedding", vector=query_embedding, num_candidates=limit)
-            )
-            request = SearchRequest.create(vector_search)
-
-            # Prepare the options dictionary
-            options_dict = {"limit": limit, "fields": ["*"]}
-            if filters:
-                options_dict["raw"] = filters
-
-            search_args = {
-                "index": self.search_index_name,
-                "request": request,
-                "options": SearchOptions(**options_dict),  # Construct SearchOptions with the dictionary
-            }
-
-            if self.is_global_level_index:
-                results = self.cluster.search(**search_args)
-            else:
-                results = self.scope.search(**search_args)
-
-            return self.__get_doc_from_kv(results)
-        except Exception as e:
-            logger.error(f"Error during search: {e}")
-            raise
-
     def __get_doc_from_kv(self, response: SearchResult) -> List[Document]:
         """
         Convert search results to Document objects by fetching full documents from KV store.
@@ -968,7 +928,9 @@ class CouchbaseBase(VectorDb):
         raise NotImplementedError
     
     @abstractmethod
-    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
+    def search(
+        self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
+    ) -> List[Document]:
         raise NotImplementedError
     
     # === ASYNC SUPPORT USING acouchbase ===
@@ -1479,7 +1441,12 @@ class CouchbaseSearch(CouchbaseBase):
         self._create_collection_and_scope()
         self._create_fts_index()
 
-    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
+    def search(
+        self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
+    ) -> List[Document]:
+        if isinstance(filters, List):
+            log_warning("Filter Expressions are not yet supported in Couchbase. No filters will be applied.")
+            filters = None
         """Search the Couchbase bucket for documents relevant to the query."""
         query_embedding = self.embedder.get_embedding(query)
         if query_embedding is None:
@@ -1807,7 +1774,12 @@ class CouchbaseQuery(CouchbaseBase):
         self._nprobes = n_probes
         self._embedding_key = embedding_key
     
-    def search(self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Document]:
+    def search(
+        self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
+    ) -> List[Document]:
+        if isinstance(filters, List):
+            log_warning("Filter Expressions are not yet supported in Couchbase. No filters will be applied.")
+            filters = None
         query_embedding = self.embedder.get_embedding(query)
         if query_embedding is None:
             logger.error(f"Failed to generate embedding for query: {query}")

@@ -92,48 +92,6 @@ class CouchbaseBase(VectorDb):
         self._async_bucket: Optional[AsyncBucket] = None
         self._async_scope: Optional[AsyncScope] = None
         self._async_collection: Optional[AsyncCollection] = None
-
-    def _apply_query_options(
-        self,
-        named_parameters: Optional[Dict[str, Any]] = None,
-        **overrides: Any,
-    ) -> QueryOptions:
-        """Merge user provided QueryOptions with dynamic per-call parameters.
-
-        Priority (highest last): query_options < overrides kwargs < named_parameters arg.
-
-        Ensures scan_consistency defaults to REQUEST_PLUS unless explicitly set.
-        """
-        opt_kwargs: Dict[str, Any] = {}
-        
-        # Start with defaults from user supplied QueryOptions (if any)
-        if self.query_options is not None:
-            # Use vars() to get all attributes as a dictionary dynamically
-            for key, value in vars(self.query_options).items():
-                if value is not None:
-                    # Make a shallow copy for mutable params to avoid accidental mutation of base
-                    if isinstance(value, dict):
-                        opt_kwargs[key] = value.copy()
-                    elif isinstance(value, (list, tuple)):
-                        opt_kwargs[key] = list(value)
-                    else:
-                        opt_kwargs[key] = value
-
-        # Apply override kwargs (e.g., caller explicitly sets scan_consistency)
-        for k, v in overrides.items():
-            opt_kwargs[k] = v
-
-        # Merge named parameters (caller wins)
-        if named_parameters:
-            existing_named = opt_kwargs.get("named_parameters", {}) or {}
-            merged_named = {**existing_named, **named_parameters}
-            opt_kwargs["named_parameters"] = merged_named
-
-        # Guarantee a reasonable default for scan_consistency if not provided anywhere.
-        if "scan_consistency" not in opt_kwargs or opt_kwargs["scan_consistency"] is None:
-            opt_kwargs["scan_consistency"] = QueryScanConsistency.REQUEST_PLUS
-
-        return QueryOptions(**opt_kwargs)
     
     @property
     def cluster(self) -> Cluster:
@@ -524,13 +482,16 @@ class CouchbaseBase(VectorDb):
         try:
             # Use N1QL query to check if document with given name exists
             query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
-            result = self.scope.query(
-                query,
-                self._apply_query_options(
-                    named_parameters={"name": name},
-                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
-                ),
-            )
+            
+            # Copy query_options and add named_parameters
+            query_opts = QueryOptions(named_parameters={"name": name})
+            if self.query_options is not None:
+                # Copy attributes from existing query_options
+                for key, value in vars(self.query_options).items():
+                    if value is not None and key != 'named_parameters':
+                        setattr(query_opts, key, value)
+            
+            result = self.scope.query(query, query_opts)
             for row in result.rows():
                 return True
             return False
@@ -554,13 +515,16 @@ class CouchbaseBase(VectorDb):
         try:
             # Use N1QL query to check if document with given content_hash exists
             query = f"SELECT content_hash FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_hash = $content_hash LIMIT 1"
-            result = self.scope.query(
-                query,
-                self._apply_query_options(
-                    named_parameters={"content_hash": content_hash},
-                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
-                ),
-            )
+            
+            # Copy query_options and add named_parameters
+            query_opts = QueryOptions(named_parameters={"content_hash": content_hash})
+            if self.query_options is not None:
+                # Copy attributes from existing query_options
+                for key, value in vars(self.query_options).items():
+                    if value is not None and key != 'named_parameters':
+                        setattr(query_opts, key, value)
+            
+            result = self.scope.query(query, query_opts)
             for row in result.rows():
                 return True
             return False
@@ -609,13 +573,15 @@ class CouchbaseBase(VectorDb):
             log_debug(f"Couchbase VectorDB : Deleting documents with name {name}")
 
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name"
-            result = self.scope.query(
-                query,
-                self._apply_query_options(
-                    named_parameters={"name": name},
-                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
-                ),
-            )
+            
+            # Copy query_options and add named_parameters
+            query_opts = QueryOptions(named_parameters={"name": name})
+            if self.query_options is not None:
+                # Copy attributes from existing query_options
+                for key, value in vars(self.query_options).items():
+                    if value is not None and key != 'named_parameters':
+                        setattr(query_opts, key, value)
+            result = self.scope.query(query, query_opts)
             rows = list(result.rows())
             doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
             if not doc_ids:
@@ -689,13 +655,16 @@ class CouchbaseBase(VectorDb):
 
             where_clause = " AND ".join(where_conditions)
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE {where_clause}"
-            result = self.scope.query(
-                query,
-                self._apply_query_options(
-                    named_parameters=named_parameters,
-                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
-                ),
-            )
+            
+            # Copy query_options and add named_parameters
+            query_opts = QueryOptions(named_parameters=named_parameters)
+            if self.query_options is not None:
+                # Copy attributes from existing query_options
+                for key, value in vars(self.query_options).items():
+                    if value is not None and key != 'named_parameters':
+                        setattr(query_opts, key, value)
+            
+            result = self.scope.query(query, query_opts)
             rows = list(result.rows())
             doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
             if not doc_ids:
@@ -746,13 +715,16 @@ class CouchbaseBase(VectorDb):
                 f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} "
                 "WHERE content_id = $content_id OR recipes.content_id = $content_id"
             )
-            result = self.scope.query(
-                query,
-                self._apply_query_options(
-                    named_parameters={"content_id": content_id},
-                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
-                ),
-            )
+            
+            # Copy query_options and add named_parameters
+            query_opts = QueryOptions(named_parameters={"content_id": content_id})
+            if self.query_options is not None:
+                # Copy attributes from existing query_options
+                for key, value in vars(self.query_options).items():
+                    if value is not None and key != 'named_parameters':
+                        setattr(query_opts, key, value)
+            
+            result = self.scope.query(query, query_opts)
             rows = list(result.rows())
 
             # Collect IDs to delete
@@ -810,13 +782,16 @@ class CouchbaseBase(VectorDb):
             log_debug(f"Couchbase VectorDB : Deleting documents with content_hash {content_hash}")
 
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_hash = $content_hash"
-            result = self.scope.query(
-                query,
-                self._apply_query_options(
-                    named_parameters={"content_hash": content_hash},
-                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
-                ),
-            )
+            
+            # Copy query_options and add named_parameters
+            query_opts = QueryOptions(named_parameters={"content_hash": content_hash})
+            if self.query_options is not None:
+                # Copy attributes from existing query_options
+                for key, value in vars(self.query_options).items():
+                    if value is not None and key != 'named_parameters':
+                        setattr(query_opts, key, value)
+            
+            result = self.scope.query(query, query_opts)
             rows = list(result.rows())
             doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
             if not doc_ids:
@@ -1053,13 +1028,16 @@ class CouchbaseBase(VectorDb):
         try:
             query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
             async_scope_instance = await self.get_async_scope()
-            result = async_scope_instance.query(
-                query,
-                self._apply_query_options(
-                    named_parameters={"name": name},
-                    scan_consistency=QueryScanConsistency.REQUEST_PLUS,
-                ),
-            )
+            
+            # Copy query_options and add named_parameters
+            query_opts = QueryOptions(named_parameters={"name": name})
+            if self.query_options is not None:
+                # Copy attributes from existing query_options
+                for key, value in vars(self.query_options).items():
+                    if value is not None and key != 'named_parameters':
+                        setattr(query_opts, key, value)
+            
+            result = async_scope_instance.query(query, query_opts)
             async for row in result.rows():
                 return True
             return False

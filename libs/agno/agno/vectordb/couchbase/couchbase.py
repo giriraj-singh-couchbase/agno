@@ -67,7 +67,7 @@ class CouchbaseBase(VectorDb):
         batch_limit: int = 500,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        default_query_options: Optional[QueryOptions] = None,
+        query_options: Optional[QueryOptions] = None,
     ):
         if not bucket_name:
             raise ValueError("Bucket name must not be empty.")
@@ -80,7 +80,7 @@ class CouchbaseBase(VectorDb):
         self.overwrite = overwrite
         self.batch_limit = batch_limit
         # Optional base QueryOptions provided by user. Will be merged with per-query dynamic parameters.
-        self.default_query_options = default_query_options
+        self.query_options = query_options
         super().__init__(name=name, description=description)
         
         self._cluster: Optional[Cluster] = None
@@ -98,45 +98,26 @@ class CouchbaseBase(VectorDb):
         named_parameters: Optional[Dict[str, Any]] = None,
         **overrides: Any,
     ) -> QueryOptions:
-        """Merge user provided default QueryOptions with dynamic per-call parameters.
+        """Merge user provided QueryOptions with dynamic per-call parameters.
 
-        Priority (highest last): default_query_options < overrides kwargs < named_parameters arg.
+        Priority (highest last): query_options < overrides kwargs < named_parameters arg.
 
-        Ensures scan_consistency defaults to REQUEST_PLUS unless explicitly set in any layer.
+        Ensures scan_consistency defaults to REQUEST_PLUS unless explicitly set.
         """
-        # Known QueryOptions attribute names we want to copy forward if present.
-        attr_names = [
-            "scan_consistency",
-            "metrics",
-            "profile",
-            "adhoc",
-            "raw",
-            "timeout",
-            "client_context_id",
-            "positional_parameters",
-            "named_parameters",
-            "read_only",
-            "flex_index",
-            "use_replica",
-            "max_parallelism",
-            "scan_wait",
-            "scan_cap",
-            "pipeline_batch",
-            "pipeline_cap",
-        ]
         opt_kwargs: Dict[str, Any] = {}
+        
         # Start with defaults from user supplied QueryOptions (if any)
-        if self.default_query_options is not None:
-            for attr in attr_names:
-                val = getattr(self.default_query_options, attr, None)
-                if val is not None:
+        if self.query_options is not None:
+            # Use vars() to get all attributes as a dictionary dynamically
+            for key, value in vars(self.query_options).items():
+                if value is not None:
                     # Make a shallow copy for mutable params to avoid accidental mutation of base
-                    if isinstance(val, dict):
-                        opt_kwargs[attr] = val.copy()
-                    elif isinstance(val, (list, tuple)):
-                        opt_kwargs[attr] = list(val)
+                    if isinstance(value, dict):
+                        opt_kwargs[key] = value.copy()
+                    elif isinstance(value, (list, tuple)):
+                        opt_kwargs[key] = list(value)
                     else:
-                        opt_kwargs[attr] = val
+                        opt_kwargs[key] = value
 
         # Apply override kwargs (e.g., caller explicitly sets scan_consistency)
         for k, v in overrides.items():

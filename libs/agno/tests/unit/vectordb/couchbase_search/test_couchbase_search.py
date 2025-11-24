@@ -21,10 +21,13 @@ from couchbase.result import GetResult, MultiMutationResult
 from couchbase.scope import Scope
 
 from agno.knowledge.document import Document
+from agno.filters import AND, EQ, GT, IN, LT, NOT, OR
 from agno.vectordb.couchbase.couchbase import (
     CouchbaseSearch,
     OpenAIEmbedder,
+    _convert_filter_expr_to_sql,
 )
+from agno.vectordb.distance import Distance
 
 
 # -------------------------------------------------
@@ -193,6 +196,7 @@ def test_search(couchbase_fts, mock_scope, mock_collection):
         "content": "test content",
         "meta_data": {},
         "embedding": [0.1, 0.2, 0.3],
+        "id": "test_id",
     }
     mock_get_result.success = True
     mock_kv_response = Mock()
@@ -445,6 +449,7 @@ def test_search_cluster_level(mock_cluster, mock_embedder):
         "content": "test content",
         "meta_data": {},
         "embedding": [0.1, 0.2, 0.3],
+        "id": "test_id",
     }
     mock_get_result.success = True
     mock_kv_response = Mock()
@@ -778,3 +783,121 @@ def test_delete_by_content_id_exception_handling(couchbase_fts, mock_scope):
     mock_scope.query.side_effect = Exception("Query error")
     result = couchbase_fts.delete_by_content_id("content_123")
     assert result is False
+
+
+# -------------------------------------------------
+# Filter Conversion Tests
+# -------------------------------------------------
+
+def test_convert_filter_eq_string():
+    """Test EQ filter with string value"""
+    filter_expr = EQ(key="category", value="electronics")
+    result = _convert_filter_expr_to_sql(filter_expr)
+    assert result == "d.meta_data.category = 'electronics'"
+
+
+def test_convert_filter_eq_number():
+    """Test EQ filter with numeric value"""
+    filter_expr = EQ(key="price", value=99.99)
+    result = _convert_filter_expr_to_sql(filter_expr)
+    assert result == "d.meta_data.price = 99.99"
+
+
+def test_convert_filter_gt():
+    """Test GT (greater than) filter"""
+    filter_expr = GT(key="rating", value=4.5)
+    result = _convert_filter_expr_to_sql(filter_expr)
+    assert result == "d.meta_data.rating > 4.5"
+
+
+def test_convert_filter_lt():
+    """Test LT (less than) filter"""
+    filter_expr = LT(key="stock", value=10)
+    result = _convert_filter_expr_to_sql(filter_expr)
+    assert result == "d.meta_data.stock < 10"
+
+
+def test_convert_filter_in_strings():
+    """Test IN filter with string values"""
+    filter_expr = IN(key="color", values=["red", "blue", "green"])
+    result = _convert_filter_expr_to_sql(filter_expr)
+    assert result == "d.meta_data.color IN ['red', 'blue', 'green']"
+
+
+def test_convert_filter_in_numbers():
+    """Test IN filter with numeric values"""
+    filter_expr = IN(key="size", values=[8, 9, 10, 11])
+    result = _convert_filter_expr_to_sql(filter_expr)
+    assert result == "d.meta_data.size IN [8, 9, 10, 11]"
+
+
+def test_convert_filter_and():
+    """Test AND filter combining multiple conditions"""
+    filter_expr = AND(
+        EQ(key="category", value="electronics"),
+        GT(key="price", value=50)
+    )
+    result = _convert_filter_expr_to_sql(filter_expr)
+    assert result == "(d.meta_data.category = 'electronics' AND d.meta_data.price > 50)"
+
+
+def test_convert_filter_or():
+    """Test OR filter combining multiple conditions"""
+    filter_expr = OR(
+        EQ(key="color", value="red"),
+        EQ(key="color", value="blue")
+    )
+    result = _convert_filter_expr_to_sql(filter_expr)
+    assert result == "(d.meta_data.color = 'red' OR d.meta_data.color = 'blue')"
+
+
+def test_convert_filter_not():
+    """Test NOT filter negating a condition"""
+    filter_expr = NOT(expression=EQ(key="discontinued", value="true"))
+    result = _convert_filter_expr_to_sql(filter_expr)
+    assert result == "NOT (d.meta_data.discontinued = 'true')"
+
+
+def test_convert_filter_list_implicit_and():
+    """Test list of FilterExpr with implicit AND"""
+    filter_list = [
+        EQ(key="category", value="books"),
+        GT(key="rating", value=4.0),
+        LT(key="price", value=30)
+    ]
+    result = _convert_filter_expr_to_sql(filter_list)
+    assert result == "(d.meta_data.category = 'books' AND d.meta_data.rating > 4.0 AND d.meta_data.price < 30)"
+
+
+def test_convert_filter_empty_list():
+    """Test empty list returns empty string"""
+    result = _convert_filter_expr_to_sql([])
+    assert result == ""
+
+
+def test_convert_filter_complex_nested():
+    """Test complex nested filter expression"""
+    filter_expr = AND(
+        OR(
+            EQ(key="category", value="electronics"),
+            EQ(key="category", value="computers")
+        ),
+        GT(key="price", value=100),
+        NOT(expression=EQ(key="refurbished", value="true"))
+    )
+    result = _convert_filter_expr_to_sql(filter_expr)
+    expected = "((d.meta_data.category = 'electronics' OR d.meta_data.category = 'computers') AND d.meta_data.price > 100 AND NOT (d.meta_data.refurbished = 'true'))"
+    assert result == expected
+
+
+def test_convert_filter_custom_prefix():
+    """Test filter conversion with custom metadata prefix"""
+    filter_expr = EQ(key="status", value="active")
+    result = _convert_filter_expr_to_sql(filter_expr, metadata_prefix="doc.metadata")
+    assert result == "doc.metadata.status = 'active'"
+
+
+def test_convert_filter_unsupported_type():
+    """Test that unsupported filter type raises ValueError"""
+    with pytest.raises(ValueError, match="Unsupported filter type"):
+        _convert_filter_expr_to_sql("invalid_filter")

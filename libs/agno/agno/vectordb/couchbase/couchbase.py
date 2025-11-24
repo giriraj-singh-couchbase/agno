@@ -139,6 +139,24 @@ class CouchbaseBase(VectorDb):
         self._async_scope: Optional[AsyncScope] = None
         self._async_collection: Optional[AsyncCollection] = None
     
+    def _merge_query_options(self, named_parameters: Dict[str, Any]) -> QueryOptions:
+        """
+        Helper method to merge base query_options with named_parameters.
+        
+        Args:
+            named_parameters: Dictionary of named parameters to use in the query
+            
+        Returns:
+            QueryOptions object with merged settings
+        """
+        query_opts = QueryOptions(named_parameters=named_parameters)
+        if self.query_options is not None:
+            # Copy attributes from existing query_options
+            for key, value in vars(self.query_options).items():
+                if value is not None and key != 'named_parameters':
+                    setattr(query_opts, key, value)
+        return query_opts
+    
     @property
     def cluster(self) -> Cluster:
         """Create or retrieve the Couchbase cluster connection."""
@@ -529,13 +547,7 @@ class CouchbaseBase(VectorDb):
             # Use N1QL query to check if document with given name exists
             query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
             
-            # Copy query_options and add named_parameters
-            query_opts = QueryOptions(named_parameters={"name": name})
-            if self.query_options is not None:
-                # Copy attributes from existing query_options
-                for key, value in vars(self.query_options).items():
-                    if value is not None and key != 'named_parameters':
-                        setattr(query_opts, key, value)
+            query_opts = self._merge_query_options({"name": name})
             
             result = self.scope.query(query, query_opts)
             for row in result.rows():
@@ -562,13 +574,7 @@ class CouchbaseBase(VectorDb):
             # Use N1QL query to check if document with given content_hash exists
             query = f"SELECT content_hash FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_hash = $content_hash LIMIT 1"
             
-            # Copy query_options and add named_parameters
-            query_opts = QueryOptions(named_parameters={"content_hash": content_hash})
-            if self.query_options is not None:
-                # Copy attributes from existing query_options
-                for key, value in vars(self.query_options).items():
-                    if value is not None and key != 'named_parameters':
-                        setattr(query_opts, key, value)
+            query_opts = self._merge_query_options({"content_hash": content_hash})
             
             result = self.scope.query(query, query_opts)
             for row in result.rows():
@@ -620,13 +626,7 @@ class CouchbaseBase(VectorDb):
 
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name"
             
-            # Copy query_options and add named_parameters
-            query_opts = QueryOptions(named_parameters={"name": name})
-            if self.query_options is not None:
-                # Copy attributes from existing query_options
-                for key, value in vars(self.query_options).items():
-                    if value is not None and key != 'named_parameters':
-                        setattr(query_opts, key, value)
+            query_opts = self._merge_query_options({"name": name})
             result = self.scope.query(query, query_opts)
             rows = list(result.rows())
             doc_ids = [row.get("doc_id") for row in rows if row.get("doc_id")]
@@ -702,13 +702,7 @@ class CouchbaseBase(VectorDb):
             where_clause = " AND ".join(where_conditions)
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE {where_clause}"
             
-            # Copy query_options and add named_parameters
-            query_opts = QueryOptions(named_parameters=named_parameters)
-            if self.query_options is not None:
-                # Copy attributes from existing query_options
-                for key, value in vars(self.query_options).items():
-                    if value is not None and key != 'named_parameters':
-                        setattr(query_opts, key, value)
+            query_opts = self._merge_query_options(named_parameters)
             
             result = self.scope.query(query, query_opts)
             rows = list(result.rows())
@@ -762,13 +756,7 @@ class CouchbaseBase(VectorDb):
                 "WHERE content_id = $content_id OR recipes.content_id = $content_id"
             )
             
-            # Copy query_options and add named_parameters
-            query_opts = QueryOptions(named_parameters={"content_id": content_id})
-            if self.query_options is not None:
-                # Copy attributes from existing query_options
-                for key, value in vars(self.query_options).items():
-                    if value is not None and key != 'named_parameters':
-                        setattr(query_opts, key, value)
+            query_opts = self._merge_query_options({"content_id": content_id})
             
             result = self.scope.query(query, query_opts)
             rows = list(result.rows())
@@ -829,13 +817,7 @@ class CouchbaseBase(VectorDb):
 
             query = f"SELECT META().id as doc_id, * FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE content_hash = $content_hash"
             
-            # Copy query_options and add named_parameters
-            query_opts = QueryOptions(named_parameters={"content_hash": content_hash})
-            if self.query_options is not None:
-                # Copy attributes from existing query_options
-                for key, value in vars(self.query_options).items():
-                    if value is not None and key != 'named_parameters':
-                        setattr(query_opts, key, value)
+            query_opts = self._merge_query_options({"content_hash": content_hash})
             
             result = self.scope.query(query, query_opts)
             rows = list(result.rows())
@@ -1075,13 +1057,7 @@ class CouchbaseBase(VectorDb):
             query = f"SELECT name FROM {self.bucket_name}.{self.scope_name}.{self.collection_name} WHERE name = $name LIMIT 1"
             async_scope_instance = await self.get_async_scope()
             
-            # Copy query_options and add named_parameters
-            query_opts = QueryOptions(named_parameters={"name": name})
-            if self.query_options is not None:
-                # Copy attributes from existing query_options
-                for key, value in vars(self.query_options).items():
-                    if value is not None and key != 'named_parameters':
-                        setattr(query_opts, key, value)
+            query_opts = self._merge_query_options({"name": name})
             
             result = async_scope_instance.query(query, query_opts)
             async for row in result.rows():

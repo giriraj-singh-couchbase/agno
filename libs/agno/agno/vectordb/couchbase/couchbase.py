@@ -1934,67 +1934,29 @@ class CouchbaseQuery(CouchbaseBase):
 
             documents: List[Document] = []
 
-            # Obtain rows iterable/generator
-            rows_source = None
-            if hasattr(result, "rows"):
-                rows_attr = result.rows
-                # If it's callable (method or async gen func), invoke it
-                rows_source = rows_attr() if callable(rows_attr) else rows_attr
-            else:
-                logger.warning("[async] Query result object has no 'rows' attribute")
-                return documents
-
-            # If the rows_source is awaitable but not an async iterator yet, await it
-            if inspect.isawaitable(rows_source) and not hasattr(rows_source, "__aiter"):
-                rows_source = await rows_source
-
-            # Iterate over async rows if possible (async generator / async iterator), else fall back to sync iteration.
-            # Some async generator objects from tests were not passing the hasattr(rows_source, "__aiter") check reliably,
-            # so we broaden detection to include inspect.isasyncgen which is explicit for async generators.
-            if inspect.isasyncgen(rows_source) or hasattr(rows_source, "__aiter"):
-                async for row in rows_source:
-                    try:
-                        doc_id = row.get("id")
-                        name = row.get("name", "")
-                        content = row.get("content", "")
-                        meta_data = row.get("meta_data", {})
-                        embedding = row.get("embedding", [])
-                        content_id = row.get("content_id")
-                        documents.append(
-                            Document(
-                                id=doc_id,
-                                name=name,
-                                content=content,
-                                meta_data=meta_data,
-                                embedding=embedding,
-                                content_id=content_id,
-                            )
+            # Iterate over async rows using the rows() method
+            # AsyncN1QLRequest has a rows() method that returns an async iterator
+            async for row in result.rows():
+                try:
+                    doc_id = row.get("id")
+                    name = row.get("name", "")
+                    content = row.get("content", "")
+                    meta_data = row.get("meta_data", {})
+                    embedding = row.get("embedding", [])
+                    content_id = row.get("content_id")
+                    documents.append(
+                        Document(
+                            id=doc_id,
+                            name=name,
+                            content=content,
+                            meta_data=meta_data,
+                            embedding=embedding,
+                            content_id=content_id,
                         )
-                    except Exception as row_err:
-                        logger.warning(f"[async] Error processing search result row: {row_err}")
-                        continue
-            else:  # Synchronous iterable fallback (unlikely for acouchbase, but safe for mocks)
-                for row in rows_source:
-                    try:
-                        doc_id = row.get("id")
-                        name = row.get("name", "")
-                        content = row.get("content", "")
-                        meta_data = row.get("meta_data", {})
-                        embedding = row.get("embedding", [])
-                        content_id = row.get("content_id")
-                        documents.append(
-                            Document(
-                                id=doc_id,
-                                name=name,
-                                content=content,
-                                meta_data=meta_data,
-                                embedding=embedding,
-                                content_id=content_id,
-                            )
-                        )
-                    except Exception as row_err:
-                        logger.warning(f"[async] Error processing search result row (sync fallback): {row_err}")
-                        continue
+                    )
+                except Exception as row_err:
+                    logger.warning(f"[async] Error processing search result row: {row_err}")
+                    continue
 
             return documents
 

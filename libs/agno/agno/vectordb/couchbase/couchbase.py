@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Any, Dict, List, Optional, Union
 import inspect
 
-from agno.filters import FilterExpr
+from agno.filters import FilterExpr, EQ, GT, LT, IN, AND, OR, NOT
 from agno.knowledge.document import Document
 from agno.knowledge.embedder import Embedder
 from agno.knowledge.embedder.openai import OpenAIEmbedder
@@ -50,6 +50,52 @@ try:
     from couchbase.vector_search import VectorQuery, VectorSearch
 except ImportError:
     raise ImportError("`couchbase` not installed. Please install using `pip install couchbase`")
+
+
+def _convert_filter_expr_to_sql(filter_expr: FilterExpr, metadata_prefix: str = "d.meta_data") -> str:
+    """
+    Convert agno FilterExpr to SQL++ WHERE clause.
+    
+    Args:
+        filter_expr: The filter expression to convert
+        metadata_prefix: The prefix for metadata fields in the SQL query
+        
+    Returns:
+        SQL++ WHERE clause string
+    """
+    if isinstance(filter_expr, EQ):
+        if isinstance(filter_expr.value, str):
+            return f"{metadata_prefix}.{filter_expr.key} = '{filter_expr.value}'"
+        else:
+            return f"{metadata_prefix}.{filter_expr.key} = {filter_expr.value}"
+    
+    elif isinstance(filter_expr, GT):
+        return f"{metadata_prefix}.{filter_expr.key} > {filter_expr.value}"
+    
+    elif isinstance(filter_expr, LT):
+        return f"{metadata_prefix}.{filter_expr.key} < {filter_expr.value}"
+    
+    elif isinstance(filter_expr, IN):
+        values = ", ".join(
+            [f"'{v}'" if isinstance(v, str) else str(v) for v in filter_expr.values]
+        )
+        return f"{metadata_prefix}.{filter_expr.key} IN [{values}]"
+    
+    elif isinstance(filter_expr, AND):
+        conditions = [_convert_filter_expr_to_sql(expr, metadata_prefix) for expr in filter_expr.expressions]
+        return "(" + " AND ".join(conditions) + ")"
+    
+    elif isinstance(filter_expr, OR):
+        conditions = [_convert_filter_expr_to_sql(expr, metadata_prefix) for expr in filter_expr.expressions]
+        return "(" + " OR ".join(conditions) + ")"
+    
+    elif isinstance(filter_expr, NOT):
+        inner_condition = _convert_filter_expr_to_sql(filter_expr.expression, metadata_prefix)
+        return f"NOT ({inner_condition})"
+    
+    else:
+        raise ValueError(f"Unsupported filter type: {type(filter_expr)}")
+
 
 class CouchbaseBase(VectorDb):
     """
@@ -1269,7 +1315,7 @@ class CouchbaseBase(VectorDb):
 
     @abstractmethod
     async def async_search(
-        self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
+        self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
     ) -> List[Document]:
         raise NotImplementedError
     
@@ -1403,10 +1449,11 @@ class CouchbaseSearch(CouchbaseBase):
     def search(
         self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
     ) -> List[Document]:
-        if isinstance(filters, List):
-            log_warning("Filter Expressions are not yet supported in Couchbase. No filters will be applied.")
-            filters = None
         """Search the Couchbase bucket for documents relevant to the query."""
+        if isinstance(filters, List):
+            log_warning("FilterExpr list is not yet supported in CouchbaseSearch (FTS-based). Use dict filters or CouchbaseQuery instead. No filters will be applied.")
+            filters = None
+        
         query_embedding = self.embedder.get_embedding(query)
         if query_embedding is None:
             logger.error(f"Failed to generate embedding for query: {query}")
@@ -1566,8 +1613,9 @@ class CouchbaseSearch(CouchbaseBase):
         self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
     ) -> List[Document]:
         if isinstance(filters, List):
-            log_warning("Filter Expressions are not yet supported in Couchbase. No filters will be applied.")
+            log_warning("FilterExpr list is not yet supported in CouchbaseSearch (FTS-based). Use dict filters or CouchbaseQuery instead. No filters will be applied.")
             filters = None
+        
         query_embedding = self.embedder.get_embedding(query)
         if query_embedding is None:
             logger.error(f"[async] Failed to generate embedding for query: {query}")
@@ -1736,9 +1784,6 @@ class CouchbaseQuery(CouchbaseBase):
     def search(
         self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
     ) -> List[Document]:
-        if isinstance(filters, List):
-            log_warning("Filter Expressions are not yet supported in Couchbase. No filters will be applied.")
-            filters = None
         query_embedding = self.embedder.get_embedding(query)
         if query_embedding is None:
             logger.error(f"Failed to generate embedding for query: {query}")
@@ -1763,10 +1808,37 @@ class CouchbaseQuery(CouchbaseBase):
         else:
             distance_function_exp = f"VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}')"
         
+        # Handle filters if provided
+        where_clause = ""
+        if filters:
+            try:
+                if isinstance(filters, dict):
+                    # Handle dictionary filters
+                    filter_conditions = []
+                    for key, value in filters.items():
+                        if isinstance(value, str):
+                            filter_conditions.append(f"d.meta_data.{key} = '{value}'")
+                        else:
+                            filter_conditions.append(f"d.meta_data.{key} = {value}")
+                    if filter_conditions:
+                        where_clause = f"WHERE {' AND '.join(filter_conditions)}"
+                elif isinstance(filters, list):
+                    # Handle List[FilterExpr] - combine multiple filters with AND
+                    filter_conditions = [_convert_filter_expr_to_sql(f, "d.meta_data") for f in filters]
+                    if filter_conditions:
+                        where_clause = f"WHERE {' AND '.join(filter_conditions)}"
+                elif isinstance(filters, FilterExpr):
+                    # Handle single FilterExpr
+                    filter_sql = _convert_filter_expr_to_sql(filters, "d.meta_data")
+                    where_clause = f"WHERE {filter_sql}"
+            except Exception as e:
+                logger.warning(f"Failed to process filters: {e}")
+        
         # Build the SQL++ query
         query_str = f"""
         SELECT {fields}, {distance_function_exp} as score
         FROM {query_context} d
+        {where_clause}
         ORDER BY score
         LIMIT {limit}
         """
@@ -1809,7 +1881,7 @@ class CouchbaseQuery(CouchbaseBase):
         logger.info(f"CouchbaseQuery vector store created successfully for collection '{self.collection_name}'")
     
     async def async_search(
-        self, query: str, limit: int = 5, filters: Optional[Dict[str, Any]] = None
+        self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
     ) -> List[Document]:
         """Async version of search using async query execution."""
         # Generate embedding asynchronously if the embedder supports it
@@ -1841,10 +1913,37 @@ class CouchbaseQuery(CouchbaseBase):
         else:
             distance_function_exp = f"VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}')"
         
+        # Handle filters if provided
+        where_clause = ""
+        if filters:
+            try:
+                if isinstance(filters, dict):
+                    # Handle dictionary filters
+                    filter_conditions = []
+                    for key, value in filters.items():
+                        if isinstance(value, str):
+                            filter_conditions.append(f"d.meta_data.{key} = '{value}'")
+                        else:
+                            filter_conditions.append(f"d.meta_data.{key} = {value}")
+                    if filter_conditions:
+                        where_clause = f"WHERE {' AND '.join(filter_conditions)}"
+                elif isinstance(filters, list):
+                    # Handle List[FilterExpr] - combine multiple filters with AND
+                    filter_conditions = [_convert_filter_expr_to_sql(f, "d.meta_data") for f in filters]
+                    if filter_conditions:
+                        where_clause = f"WHERE {' AND '.join(filter_conditions)}"
+                elif isinstance(filters, FilterExpr):
+                    # Handle single FilterExpr
+                    filter_sql = _convert_filter_expr_to_sql(filters, "d.meta_data")
+                    where_clause = f"WHERE {filter_sql}"
+            except Exception as e:
+                logger.warning(f"[async] Failed to process filters: {e}")
+        
         # Build the SQL++ query
         query_str = f"""
         SELECT {fields}, {distance_function_exp} as score
         FROM {query_context} d
+        {where_clause}
         ORDER BY score
         LIMIT {limit}
         """

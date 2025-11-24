@@ -63,6 +63,13 @@ def _convert_filter_expr_to_sql(filter_expr: FilterExpr, metadata_prefix: str = 
     Returns:
         SQL++ WHERE clause string
     """
+    # Handle list of FilterExpr (implicit AND)
+    if isinstance(filter_expr, list):
+        if not filter_expr:
+            return ""
+        conditions = [_convert_filter_expr_to_sql(f, metadata_prefix) for f in filter_expr]
+        return "(" + " AND ".join(conditions) + ")"
+    
     if isinstance(filter_expr, EQ):
         if isinstance(filter_expr.value, str):
             return f"{metadata_prefix}.{filter_expr.key} = '{filter_expr.value}'"
@@ -433,7 +440,7 @@ class CouchbaseBase(VectorDb):
         if errors_occurred:
             logger.warning("Some errors occurred during the upsert operation. Please check logs for details.")
 
-    def __get_doc_from_kv(self, response: SearchResult) -> List[Document]:
+    def _get_doc_from_kv(self, response: SearchResult) -> List[Document]:
         """
         Convert search results to Document objects by fetching full documents from KV store.
 
@@ -453,27 +460,46 @@ class CouchbaseBase(VectorDb):
         ids = [hit[0] for hit in search_hits]
         kv_response = self.collection.get_multi(keys=ids)
 
+        # Check if there were any errors
         if not kv_response.all_ok:
-            raise Exception(f"Failed to get documents from KV store: {kv_response.exceptions}")
+            failed_keys = list(kv_response.exceptions.keys()) if kv_response.exceptions else []
+            logger.warning(
+                f"Some documents failed to retrieve from KV store. "
+                f"Failed keys: {failed_keys[:5]}{'...' if len(failed_keys) > 5 else ''}. "
+                f"This might indicate the FTS index is out of sync with the KV store. "
+                f"Consider recreating the FTS index or waiting for it to update."
+            )
+            # Continue processing successful results instead of raising an exception
 
         # Convert results to Documents
         for doc_id, score in search_hits:
             get_result = kv_response.results.get(doc_id)
             if get_result is None or not get_result.success:
-                logger.warning(f"Document {doc_id} not found in KV store")
+                logger.warning(f"Document {doc_id} not found in KV store or failed to retrieve")
                 continue
 
             value = get_result.value
-            documents.append(
-                Document(
-                    id=doc_id,
-                    name=value["name"],
-                    content=value["content"],
-                    meta_data=value["meta_data"],
-                    embedding=value["embedding"],
-                    content_id=value.get("content_id"),
+            
+            # Handle potential missing fields gracefully
+            # Support both 'content' and 'text' field names for content
+            # Support both 'meta_data' and 'metadata' field names for metadata
+            try:
+                content = value.get("content") or value.get("text", "")
+                meta_data = value.get("meta_data") or value.get("metadata", {})
+                
+                documents.append(
+                    Document(
+                        id=doc_id,
+                        name=value.get("name", ""),
+                        content=content,
+                        meta_data=meta_data,
+                        embedding=value.get("embedding"),
+                        content_id=value.get("content_id"),
+                    )
                 )
-            )
+            except Exception as e:
+                logger.warning(f"Error creating Document from {doc_id}: {e}. Value keys: {list(value.keys()) if isinstance(value, dict) else 'N/A'}")
+                continue
 
         return documents
 
@@ -1458,54 +1484,10 @@ class CouchbaseSearch(CouchbaseBase):
             else:
                 results = self.scope.search(**search_args)
 
-            return self.__get_doc_from_kv(results)
+            return self._get_doc_from_kv(results)
         except Exception as e:
             logger.error(f"Error during search: {e}")
             raise
-
-    def __get_doc_from_kv(self, response: SearchResult) -> List[Document]:
-        """
-        Convert search results to Document objects by fetching full documents from KV store.
-
-        Args:
-            response: SearchResult from Couchbase search query
-
-        Returns:
-            List of Document objects
-        """
-        documents: List[Document] = []
-        search_hits = [(doc.id, doc.score) for doc in response.rows()]
-
-        if not search_hits:
-            return documents
-
-        # Fetch documents from KV store
-        ids = [hit[0] for hit in search_hits]
-        kv_response = self.collection.get_multi(keys=ids)
-
-        if not kv_response.all_ok:
-            raise Exception(f"Failed to get documents from KV store: {kv_response.exceptions}")
-
-        # Convert results to Documents
-        for doc_id, score in search_hits:
-            get_result = kv_response.results.get(doc_id)
-            if get_result is None or not get_result.success:
-                logger.warning(f"Document {doc_id} not found in KV store")
-                continue
-
-            value = get_result.value
-            documents.append(
-                Document(
-                    id=doc_id,
-                    name=value["name"],
-                    content=value["content"],
-                    meta_data=value["meta_data"],
-                    embedding=value["embedding"],
-                    content_id=value.get("content_id"),
-                )
-            )
-
-        return documents
 
     def get_count(self) -> int:
         """Get the count of documents in the Couchbase bucket."""
@@ -1621,12 +1603,12 @@ class CouchbaseSearch(CouchbaseBase):
                 async_scope_instance = await self.get_async_scope()
                 results = async_scope_instance.search(**search_args)
 
-            return await self.__async_get_doc_from_kv(results)
+            return await self._async_get_doc_from_kv(results)
         except Exception as e:
             logger.error(f"[async] Error during search: {e}")
             raise
 
-    async def __async_get_doc_from_kv(self, response: AsyncSearchIndex) -> List[Document]:
+    async def _async_get_doc_from_kv(self, response: AsyncSearchIndex) -> List[Document]:
         """
         Convert search results to Document objects by fetching full documents from KV store concurrently.
 
@@ -1675,18 +1657,24 @@ class CouchbaseSearch(CouchbaseBase):
                         )
                         continue
 
+                    # Handle potential missing fields gracefully
+                    # Support both 'content' and 'text' field names for content
+                    # Support both 'meta_data' and 'metadata' field names for metadata
+                    content = value.get("content") or value.get("text", "")
+                    meta_data = value.get("meta_data") or value.get("metadata", {})
+
                     documents.append(
                         Document(
                             id=doc_id,
                             name=value.get("name"),
-                            content=value.get("content", ""),
-                            meta_data=value.get("meta_data", {}),
+                            content=content,
+                            meta_data=meta_data,
                             embedding=value.get("embedding", []),
                         )
                     )
                 except Exception as e:
                     logger.warning(
-                        f"[async] Error processing document {doc_id} from KV store: {e}. Value: {getattr(get_result, 'content_as', 'N/A')}"
+                        f"[async] Error processing document {doc_id} from KV store: {e}. Value keys: {list(value.keys()) if isinstance(value, dict) else 'N/A'}"
                     )
                     continue
 
@@ -1798,15 +1786,11 @@ class CouchbaseQuery(CouchbaseBase):
                             filter_conditions.append(f"d.meta_data.{key} = {value}")
                     if filter_conditions:
                         where_clause = f"WHERE {' AND '.join(filter_conditions)}"
-                elif isinstance(filters, list):
-                    # Handle List[FilterExpr] - combine multiple filters with AND
-                    filter_conditions = [_convert_filter_expr_to_sql(f, "d.meta_data") for f in filters]
-                    if filter_conditions:
-                        where_clause = f"WHERE {' AND '.join(filter_conditions)}"
-                elif isinstance(filters, FilterExpr):
-                    # Handle single FilterExpr
+                else:
+                    # Handle FilterExpr or List[FilterExpr]
                     filter_sql = _convert_filter_expr_to_sql(filters, "d.meta_data")
-                    where_clause = f"WHERE {filter_sql}"
+                    if filter_sql:
+                        where_clause = f"WHERE {filter_sql}"
             except Exception as e:
                 logger.warning(f"Failed to process filters: {e}")
         
@@ -1826,12 +1810,15 @@ class CouchbaseQuery(CouchbaseBase):
             documents: List[Document] = []
             
             # Process results
+            # Support both field name variations:
+            # - Vector index returns: content, meta, vector
+            # - Direct KV returns: text, metadata, embedding
             for row in result.rows():
                 doc_id = row.get("id", "")
                 name = row.get("name", "")
-                content = row.get("content", "")
-                meta_data = row.get("meta_data", {})
-                embedding = row.get(self._embedding_key, [])
+                content = row.get("content") or row.get("text", "")
+                meta_data = row.get("meta_data") or row.get("meta") or row.get("metadata", {})
+                embedding = row.get(self._embedding_key) or row.get("vector") or row.get("embedding", [])
                 content_id = row.get("content_id")
                 
                 documents.append(
@@ -1903,15 +1890,11 @@ class CouchbaseQuery(CouchbaseBase):
                             filter_conditions.append(f"d.meta_data.{key} = {value}")
                     if filter_conditions:
                         where_clause = f"WHERE {' AND '.join(filter_conditions)}"
-                elif isinstance(filters, list):
-                    # Handle List[FilterExpr] - combine multiple filters with AND
-                    filter_conditions = [_convert_filter_expr_to_sql(f, "d.meta_data") for f in filters]
-                    if filter_conditions:
-                        where_clause = f"WHERE {' AND '.join(filter_conditions)}"
-                elif isinstance(filters, FilterExpr):
-                    # Handle single FilterExpr
+                else:
+                    # Handle FilterExpr or List[FilterExpr]
                     filter_sql = _convert_filter_expr_to_sql(filters, "d.meta_data")
-                    where_clause = f"WHERE {filter_sql}"
+                    if filter_sql:
+                        where_clause = f"WHERE {filter_sql}"
             except Exception as e:
                 logger.warning(f"[async] Failed to process filters: {e}")
         
@@ -1936,13 +1919,16 @@ class CouchbaseQuery(CouchbaseBase):
 
             # Iterate over async rows using the rows() method
             # AsyncN1QLRequest has a rows() method that returns an async iterator
+            # Support both field name variations:
+            # - Vector index returns: content, meta, vector
+            # - Direct KV returns: text, metadata, embedding
             async for row in result.rows():
                 try:
                     doc_id = row.get("id")
                     name = row.get("name", "")
-                    content = row.get("content", "")
-                    meta_data = row.get("meta_data", {})
-                    embedding = row.get("embedding", [])
+                    content = row.get("content") or row.get("text", "")
+                    meta_data = row.get("meta_data") or row.get("meta") or row.get("metadata", {})
+                    embedding = row.get("embedding") or row.get("vector", [])
                     content_id = row.get("content_id")
                     documents.append(
                         Document(

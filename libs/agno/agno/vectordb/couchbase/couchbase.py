@@ -52,13 +52,13 @@ except ImportError:
     raise ImportError("`couchbase` not installed. Please install using `pip install couchbase`")
 
 
-def _convert_filter_expr_to_sql(filter_expr: FilterExpr, metadata_prefix: str = "d.meta_data") -> str:
+def _convert_filter_expr_to_sql(filter_expr: FilterExpr, metadata_prefix: str = "d.metadata") -> str:
     """
     Convert agno FilterExpr to SQL++ WHERE clause.
     
     Args:
         filter_expr: The filter expression to convert
-        metadata_prefix: The prefix for metadata fields in the SQL query
+        metadata_prefix: The prefix for metadata fields in the SQL query (e.g., 'd.metadata')
         
     Returns:
         SQL++ WHERE clause string
@@ -1711,6 +1711,7 @@ class CouchbaseQuery(CouchbaseBase):
         cluster_options: ClusterOptions,
         embedder: Embedder = OpenAIEmbedder(),
         embedding_key: str = "embedding",
+        metadata_key: str = "metadata",
         overwrite: bool = False,
         batch_limit: int = 500,
         name: Optional[str] = None,
@@ -1744,6 +1745,7 @@ class CouchbaseQuery(CouchbaseBase):
         )
         self._nprobes = n_probes
         self._embedding_key = embedding_key
+        self._metadata_key = metadata_key
     
     def search(
         self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
@@ -1777,18 +1779,18 @@ class CouchbaseQuery(CouchbaseBase):
         if filters:
             try:
                 if isinstance(filters, dict):
-                    # Handle dictionary filters
+                    # Handle dictionary filters using the configured metadata_key
                     filter_conditions = []
                     for key, value in filters.items():
                         if isinstance(value, str):
-                            filter_conditions.append(f"d.meta_data.{key} = '{value}'")
+                            filter_conditions.append(f"d.{self._metadata_key}.{key} = '{value}'")
                         else:
-                            filter_conditions.append(f"d.meta_data.{key} = {value}")
+                            filter_conditions.append(f"d.{self._metadata_key}.{key} = {value}")
                     if filter_conditions:
                         where_clause = f"WHERE {' AND '.join(filter_conditions)}"
                 else:
                     # Handle FilterExpr or List[FilterExpr]
-                    filter_sql = _convert_filter_expr_to_sql(filters, "d.meta_data")
+                    filter_sql = _convert_filter_expr_to_sql(filters, f"d.{self._metadata_key}")
                     if filter_sql:
                         where_clause = f"WHERE {filter_sql}"
             except Exception as e:
@@ -1881,18 +1883,18 @@ class CouchbaseQuery(CouchbaseBase):
         if filters:
             try:
                 if isinstance(filters, dict):
-                    # Handle dictionary filters
+                    # Handle dictionary filters using the configured metadata_key
                     filter_conditions = []
                     for key, value in filters.items():
                         if isinstance(value, str):
-                            filter_conditions.append(f"d.meta_data.{key} = '{value}'")
+                            filter_conditions.append(f"d.{self._metadata_key}.{key} = '{value}'")
                         else:
-                            filter_conditions.append(f"d.meta_data.{key} = {value}")
+                            filter_conditions.append(f"d.{self._metadata_key}.{key} = {value}")
                     if filter_conditions:
                         where_clause = f"WHERE {' AND '.join(filter_conditions)}"
                 else:
                     # Handle FilterExpr or List[FilterExpr]
-                    filter_sql = _convert_filter_expr_to_sql(filters, "d.meta_data")
+                    filter_sql = _convert_filter_expr_to_sql(filters, f"d.{self._metadata_key}")
                     if filter_sql:
                         where_clause = f"WHERE {filter_sql}"
             except Exception as e:

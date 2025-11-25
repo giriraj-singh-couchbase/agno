@@ -116,6 +116,9 @@ class CouchbaseBase(VectorDb):
         couchbase_connection_string: str,
         cluster_options: ClusterOptions,
         embedder: Embedder = OpenAIEmbedder(),
+        embedding_key: str = "embedding",
+        metadata_key: str = "metadata",
+        text_field: str = "content",
         overwrite: bool = False,
         batch_limit: int = 500,
         name: Optional[str] = None,
@@ -130,6 +133,9 @@ class CouchbaseBase(VectorDb):
         self.connection_string = couchbase_connection_string
         self.cluster_options = cluster_options
         self.embedder = embedder
+        self.embedding_key = embedding_key
+        self.metadata_key = metadata_key
+        self.text_field = text_field
         self.overwrite = overwrite
         self.batch_limit = batch_limit
         # Optional base QueryOptions provided by user. Will be merged with per-query dynamic parameters.
@@ -480,12 +486,10 @@ class CouchbaseBase(VectorDb):
 
             value = get_result.value
             
-            # Handle potential missing fields gracefully
-            # Support both 'content' and 'text' field names for content
-            # Support both 'meta_data' and 'metadata' field names for metadata
+            # Use configured field names only
             try:
-                content = value.get("content") or value.get("text", "")
-                meta_data = value.get("meta_data") or value.get("metadata", {})
+                content = value.get(self.text_field, "")
+                meta_data = value.get(self.metadata_key, {})
                 
                 documents.append(
                     Document(
@@ -493,7 +497,7 @@ class CouchbaseBase(VectorDb):
                         name=value.get("name", ""),
                         content=content,
                         meta_data=meta_data,
-                        embedding=value.get("embedding"),
+                        embedding=value.get(self.embedding_key, []),
                         content_id=value.get("content_id"),
                     )
                 )
@@ -1339,6 +1343,9 @@ class CouchbaseSearch(CouchbaseBase):
         cluster_options: ClusterOptions,
         search_index: Union[str, SearchIndex],
         embedder: Embedder = OpenAIEmbedder(),
+        embedding_key: str = "embedding",
+        metadata_key: str = "metadata",
+        text_field: str = "content",
         overwrite: bool = False,
         is_global_level_index: bool = False,
         wait_until_index_ready: float = 0,
@@ -1376,6 +1383,9 @@ class CouchbaseSearch(CouchbaseBase):
             batch_limit=batch_limit,
             name=name,
             description=description,
+            embedding_key=embedding_key,
+            metadata_key=metadata_key,
+            text_field=text_field,
         )
         self.is_global_level_index = is_global_level_index
         self.wait_until_index_ready = wait_until_index_ready
@@ -1657,11 +1667,9 @@ class CouchbaseSearch(CouchbaseBase):
                         )
                         continue
 
-                    # Handle potential missing fields gracefully
-                    # Support both 'content' and 'text' field names for content
-                    # Support both 'meta_data' and 'metadata' field names for metadata
-                    content = value.get("content") or value.get("text", "")
-                    meta_data = value.get("meta_data") or value.get("metadata", {})
+                    # Use configured field names only
+                    content = value.get(self.text_field, "")
+                    meta_data = value.get(self.metadata_key, {})
 
                     documents.append(
                         Document(
@@ -1669,7 +1677,7 @@ class CouchbaseSearch(CouchbaseBase):
                             name=value.get("name"),
                             content=content,
                             meta_data=meta_data,
-                            embedding=value.get("embedding", []),
+                            embedding=value.get(self.embedding_key, []),
                         )
                     )
                 except Exception as e:
@@ -1712,6 +1720,7 @@ class CouchbaseQuery(CouchbaseBase):
         embedder: Embedder = OpenAIEmbedder(),
         embedding_key: str = "embedding",
         metadata_key: str = "metadata",
+        text_field: str = "content",
         overwrite: bool = False,
         batch_limit: int = 500,
         name: Optional[str] = None,
@@ -1729,6 +1738,9 @@ class CouchbaseQuery(CouchbaseBase):
             batch_limit=batch_limit,
             name=name,
             description=description,
+            embedding_key=embedding_key,
+            metadata_key=metadata_key,
+            text_field=text_field,
         )
         if isinstance(search_type, str):
             self._search_type = QueryVectorSearchType(search_type)
@@ -1744,8 +1756,6 @@ class CouchbaseQuery(CouchbaseBase):
             )
         )
         self._nprobes = n_probes
-        self._embedding_key = embedding_key
-        self._metadata_key = metadata_key
     
     def search(
         self, query: str, limit: int = 5, filters: Optional[Union[Dict[str, Any], List[FilterExpr]]] = None
@@ -1770,9 +1780,9 @@ class CouchbaseQuery(CouchbaseBase):
         # Determine the appropriate distance function based on search type
         if self._search_type == QueryVectorSearchType.ANN:
             nprobes_exp = f", {nprobes}" if nprobes else ""
-            distance_function_exp = f"APPROX_VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}'{nprobes_exp})"
+            distance_function_exp = f"APPROX_VECTOR_DISTANCE(d.{self.embedding_key}, {query_vector_str}, '{self._similarity}'{nprobes_exp})"
         else:
-            distance_function_exp = f"VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}')"
+            distance_function_exp = f"VECTOR_DISTANCE(d.{self.embedding_key}, {query_vector_str}, '{self._similarity}')"
         
         # Handle filters if provided
         where_clause = ""
@@ -1781,16 +1791,20 @@ class CouchbaseQuery(CouchbaseBase):
                 if isinstance(filters, dict):
                     # Handle dictionary filters using the configured metadata_key
                     filter_conditions = []
+                    # Build the field prefix based on whether metadata_key is empty
+                    field_prefix = f"d.{self.metadata_key}" if self.metadata_key else "d"
                     for key, value in filters.items():
                         if isinstance(value, str):
-                            filter_conditions.append(f"d.{self._metadata_key}.{key} = '{value}'")
+                            filter_conditions.append(f"{field_prefix}.{key} = '{value}'")
                         else:
-                            filter_conditions.append(f"d.{self._metadata_key}.{key} = {value}")
+                            filter_conditions.append(f"{field_prefix}.{key} = {value}")
                     if filter_conditions:
                         where_clause = f"WHERE {' AND '.join(filter_conditions)}"
                 else:
                     # Handle FilterExpr or List[FilterExpr]
-                    filter_sql = _convert_filter_expr_to_sql(filters, f"d.{self._metadata_key}")
+                    # Build the field prefix based on whether metadata_key is empty
+                    metadata_prefix = f"d.{self.metadata_key}" if self.metadata_key else "d"
+                    filter_sql = _convert_filter_expr_to_sql(filters, metadata_prefix)
                     if filter_sql:
                         where_clause = f"WHERE {filter_sql}"
             except Exception as e:
@@ -1818,9 +1832,9 @@ class CouchbaseQuery(CouchbaseBase):
             for row in result.rows():
                 doc_id = row.get("id", "")
                 name = row.get("name", "")
-                content = row.get("content") or row.get("text", "")
-                meta_data = row.get("meta_data") or row.get("meta") or row.get("metadata", {})
-                embedding = row.get(self._embedding_key) or row.get("vector") or row.get("embedding", [])
+                content = row.get(self.text_field, "")
+                meta_data = row.get(self.metadata_key, {})
+                embedding = row.get(self.embedding_key, [])
                 content_id = row.get("content_id")
                 
                 documents.append(
@@ -1874,9 +1888,9 @@ class CouchbaseQuery(CouchbaseBase):
         # Determine the appropriate distance function based on search type
         if self._search_type == QueryVectorSearchType.ANN:
             nprobes_exp = f", {nprobes}" if nprobes else ""
-            distance_function_exp = f"APPROX_VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}'{nprobes_exp})"
+            distance_function_exp = f"APPROX_VECTOR_DISTANCE(d.{self.embedding_key}, {query_vector_str}, '{self._similarity}'{nprobes_exp})"
         else:
-            distance_function_exp = f"VECTOR_DISTANCE(d.{self._embedding_key}, {query_vector_str}, '{self._similarity}')"
+            distance_function_exp = f"VECTOR_DISTANCE(d.{self.embedding_key}, {query_vector_str}, '{self._similarity}')"
         
         # Handle filters if provided
         where_clause = ""
@@ -1885,16 +1899,20 @@ class CouchbaseQuery(CouchbaseBase):
                 if isinstance(filters, dict):
                     # Handle dictionary filters using the configured metadata_key
                     filter_conditions = []
+                    # Build the field prefix based on whether metadata_key is empty
+                    field_prefix = f"d.{self.metadata_key}" if self.metadata_key else "d"
                     for key, value in filters.items():
                         if isinstance(value, str):
-                            filter_conditions.append(f"d.{self._metadata_key}.{key} = '{value}'")
+                            filter_conditions.append(f"{field_prefix}.{key} = '{value}'")
                         else:
-                            filter_conditions.append(f"d.{self._metadata_key}.{key} = {value}")
+                            filter_conditions.append(f"{field_prefix}.{key} = {value}")
                     if filter_conditions:
                         where_clause = f"WHERE {' AND '.join(filter_conditions)}"
                 else:
                     # Handle FilterExpr or List[FilterExpr]
-                    filter_sql = _convert_filter_expr_to_sql(filters, f"d.{self._metadata_key}")
+                    # Build the field prefix based on whether metadata_key is empty
+                    metadata_prefix = f"d.{self.metadata_key}" if self.metadata_key else "d"
+                    filter_sql = _convert_filter_expr_to_sql(filters, metadata_prefix)
                     if filter_sql:
                         where_clause = f"WHERE {filter_sql}"
             except Exception as e:
@@ -1928,9 +1946,9 @@ class CouchbaseQuery(CouchbaseBase):
                 try:
                     doc_id = row.get("id")
                     name = row.get("name", "")
-                    content = row.get("content") or row.get("text", "")
-                    meta_data = row.get("meta_data") or row.get("meta") or row.get("metadata", {})
-                    embedding = row.get("embedding") or row.get("vector", [])
+                    content = row.get(self.text_field, "")
+                    meta_data = row.get(self.metadata_key, {})
+                    embedding = row.get(self.embedding_key, [])
                     content_id = row.get("content_id")
                     documents.append(
                         Document(

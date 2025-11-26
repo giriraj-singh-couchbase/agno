@@ -41,7 +41,6 @@ try:
         SearchIndexNotFoundException,
     )
     from couchbase.management.search import ScopeSearchIndexManager, SearchIndex, SearchIndexManager
-    from couchbase.n1ql import QueryScanConsistency
     from couchbase.options import ClusterOptions, QueryOptions, SearchOptions
     from couchbase.result import SearchResult
     from couchbase.scope import Scope

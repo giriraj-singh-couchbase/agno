@@ -1,18 +1,12 @@
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from acouchbase.bucket import AsyncBucket
-from acouchbase.cluster import AsyncCluster
-from acouchbase.collection import AsyncCollection
-from acouchbase.scope import AsyncScope
 from couchbase.auth import PasswordAuthenticator
 from couchbase.bucket import Bucket
 from couchbase.cluster import Cluster
 from couchbase.collection import Collection
 from couchbase.exceptions import BucketDoesNotExistException
 from couchbase.options import ClusterOptions
-from couchbase.result import GetResult
-from couchbase.scope import Scope
 
 from agno.knowledge.document import Document
 from agno.knowledge.embedder.openai import OpenAIEmbedder
@@ -27,10 +21,12 @@ from agno.vectordb.couchbase.couchbase import (
 # Fixtures (duplicated for isolation)
 # -------------------------------------------------
 
+
 @pytest.fixture
 def mock_async_cluster():
     with patch("agno.vectordb.couchbase.couchbase.AsyncCluster") as MockAsyncClusterClass:
         from acouchbase.cluster import AsyncCluster
+
         mock_cluster_instance = AsyncMock(spec=AsyncCluster)
         MockAsyncClusterClass.connect = AsyncMock(return_value=mock_cluster_instance)
         mock_cluster_instance.wait_until_ready = Mock()
@@ -101,7 +97,7 @@ def couchbase_query_knn(mock_collection, mock_embedder):
         collection_name="test_collection",
         couchbase_connection_string="couchbase://localhost",
         search_type="KNN",  # string form
-        similarity="DOT",    # string form
+        similarity="DOT",  # string form
         n_probes=None,
         cluster_options=ClusterOptions(authenticator=PasswordAuthenticator("username", "password")),
         embedder=mock_embedder,
@@ -111,6 +107,7 @@ def couchbase_query_knn(mock_collection, mock_embedder):
 # -------------------------------------------------
 # CouchbaseQuery Tests
 # -------------------------------------------------
+
 
 def test_couchbase_query_init_with_enums(couchbase_query_ann):
     assert couchbase_query_ann.bucket_name == "test_bucket"
@@ -212,6 +209,7 @@ async def test_couchbase_query_async_search_ann(couchbase_query_ann, mock_embedd
     mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
     mock_async_cluster = AsyncMock()
     mock_result = Mock()
+
     async def mock_rows():
         mock_row = Mock()
         mock_row.get.side_effect = lambda key, default=None: {
@@ -223,9 +221,10 @@ async def test_couchbase_query_async_search_ann(couchbase_query_ann, mock_embedd
             "content_id": "async_content_123",
         }.get(key, default)
         yield mock_row
+
     mock_result.rows = mock_rows
     mock_async_cluster.query.return_value = mock_result
-    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
+    with patch.object(couchbase_query_ann, "get_async_cluster", return_value=mock_async_cluster):
         results = await couchbase_query_ann.async_search("async test query", limit=5)
     assert len(results) == 1 and results[0].id == "async_test_id"
 
@@ -235,6 +234,7 @@ async def test_couchbase_query_async_search_with_async_embedding(couchbase_query
     mock_embedder.async_get_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3, 0.4, 0.5])
     mock_async_cluster = AsyncMock()
     mock_result = Mock()
+
     async def mock_rows():
         mock_row = Mock()
         mock_row.get.side_effect = lambda key, default=None: {
@@ -246,9 +246,10 @@ async def test_couchbase_query_async_search_with_async_embedding(couchbase_query
             "content_id": "async_embed_content_123",
         }.get(key, default)
         yield mock_row
+
     mock_result.rows = mock_rows
     mock_async_cluster.query.return_value = mock_result
-    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
+    with patch.object(couchbase_query_ann, "get_async_cluster", return_value=mock_async_cluster):
         results = await couchbase_query_ann.async_search("async embed test query", limit=3)
     mock_embedder.async_get_embedding.assert_called_once_with("async embed test query")
     assert len(results) == 1 and results[0].id == "async_embed_test_id"
@@ -259,6 +260,7 @@ async def test_couchbase_query_async_search_knn(couchbase_query_knn, mock_embedd
     mock_embedder.get_embedding.return_value = [0.5, 0.4, 0.3, 0.2, 0.1]
     mock_async_cluster = AsyncMock()
     mock_result = Mock()
+
     async def mock_rows():
         mock_row = Mock()
         mock_row.get.side_effect = lambda key, default=None: {
@@ -270,9 +272,10 @@ async def test_couchbase_query_async_search_knn(couchbase_query_knn, mock_embedd
             "content_id": "knn_async_content_123",
         }.get(key, default)
         yield mock_row
+
     mock_result.rows = mock_rows
     mock_async_cluster.query.return_value = mock_result
-    with patch.object(couchbase_query_knn, 'get_async_cluster', return_value=mock_async_cluster):
+    with patch.object(couchbase_query_knn, "get_async_cluster", return_value=mock_async_cluster):
         results = await couchbase_query_knn.async_search("knn async test query", limit=2)
     assert len(results) == 1 and results[0].id == "knn_async_test_id"
 
@@ -280,7 +283,7 @@ async def test_couchbase_query_async_search_knn(couchbase_query_knn, mock_embedd
 @pytest.mark.asyncio
 async def test_couchbase_query_async_search_no_embedding(couchbase_query_ann, mock_embedder):
     mock_embedder.get_embedding.return_value = None
-    if hasattr(mock_embedder, 'async_get_embedding'):
+    if hasattr(mock_embedder, "async_get_embedding"):
         mock_embedder.async_get_embedding = AsyncMock(return_value=None)
     results = await couchbase_query_ann.async_search("test query", limit=5)
     assert results == []
@@ -291,7 +294,7 @@ async def test_couchbase_query_async_search_exception(couchbase_query_ann, mock_
     mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
     mock_async_cluster = AsyncMock()
     mock_async_cluster.query.side_effect = Exception("Async query execution failed")
-    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
+    with patch.object(couchbase_query_ann, "get_async_cluster", return_value=mock_async_cluster):
         with pytest.raises(Exception, match="Async query execution failed"):
             await couchbase_query_ann.async_search("test query", limit=5)
 
@@ -301,6 +304,7 @@ async def test_couchbase_query_async_search_row_processing_error(couchbase_query
     mock_embedder.get_embedding.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
     mock_async_cluster = AsyncMock()
     mock_result = Mock()
+
     async def mock_rows_with_error():
         bad_row = Mock()
         bad_row.get.side_effect = lambda key, default=None: (_ for _ in ()).throw(KeyError("Missing async field"))
@@ -315,9 +319,10 @@ async def test_couchbase_query_async_search_row_processing_error(couchbase_query
             "content_id": None,
         }.get(key, default)
         yield good_row
+
     mock_result.rows = mock_rows_with_error
     mock_async_cluster.query.return_value = mock_result
-    with patch.object(couchbase_query_ann, 'get_async_cluster', return_value=mock_async_cluster):
+    with patch.object(couchbase_query_ann, "get_async_cluster", return_value=mock_async_cluster):
         results = await couchbase_query_ann.async_search("test query", limit=5)
     assert len(results) == 1 and results[0].id == "async_good_id"
 
@@ -326,7 +331,9 @@ async def test_couchbase_query_async_search_row_processing_error(couchbase_query
 async def test_couchbase_query_async_create(couchbase_query_ann, mock_bucket):
     collections_manager = Mock()
     mock_bucket.collections.return_value = collections_manager
-    with patch.object(couchbase_query_ann, '_async_create_collection_and_scope', new_callable=AsyncMock) as mock_async_create:
+    with patch.object(
+        couchbase_query_ann, "_async_create_collection_and_scope", new_callable=AsyncMock
+    ) as mock_async_create:
         await couchbase_query_ann.async_create()
         mock_async_create.assert_called_once()
 
@@ -376,12 +383,14 @@ def test_couchbase_query_custom_embedding_key(mock_collection, mock_embedder):
 def test_couchbase_query_insert(couchbase_query_ann, mock_collection):
     """Test insert method."""
     from agno.knowledge.document import Document
+
     documents = [Document(content="test content 1"), Document(content="test content 2")]
     from couchbase.result import MultiMutationResult
+
     mock_result = Mock(spec=MultiMutationResult)
     mock_result.all_ok = True
     mock_collection.insert_multi.return_value = mock_result
-    
+
     # Properly connect the mock_collection to the instance
     couchbase_query_ann._collection = mock_collection
 
@@ -392,12 +401,14 @@ def test_couchbase_query_insert(couchbase_query_ann, mock_collection):
 def test_couchbase_query_upsert(couchbase_query_ann, mock_collection):
     """Test upsert method."""
     from agno.knowledge.document import Document
+
     documents = [Document(content="test content 1"), Document(content="test content 2")]
     from couchbase.result import MultiMutationResult
+
     mock_result = Mock(spec=MultiMutationResult)
     mock_result.all_ok = True
     mock_collection.upsert_multi.return_value = mock_result
-    
+
     # Properly connect the mock_collection to the instance
     couchbase_query_ann._collection = mock_collection
 
@@ -438,7 +449,7 @@ def test_couchbase_query_id_exists(couchbase_query_ann, mock_collection):
     """Test id_exists method."""
     # Properly connect the mock_collection to the instance
     couchbase_query_ann._collection = mock_collection
-    
+
     mock_exists_result = Mock()
     mock_exists_result.exists = True
     mock_collection.exists.return_value = mock_exists_result
@@ -453,7 +464,7 @@ def test_couchbase_query_delete_by_id(couchbase_query_ann, mock_collection):
     """Test delete_by_id method."""
     # Properly connect the mock_collection to the instance
     couchbase_query_ann._collection = mock_collection
-    
+
     with patch.object(couchbase_query_ann, "id_exists") as mock_id_exists:
         mock_id_exists.return_value = True
         result = couchbase_query_ann.delete_by_id("doc_1")
@@ -469,7 +480,7 @@ def test_couchbase_query_delete_by_name(couchbase_query_ann, mock_bucket, mock_c
     """Test delete_by_name method."""
     # Properly connect the mock_collection to the instance
     couchbase_query_ann._collection = mock_collection
-    
+
     mock_scope = Mock()
     couchbase_query_ann._scope = mock_scope
     mock_result = Mock()
@@ -495,7 +506,7 @@ def test_couchbase_query_delete_by_metadata(couchbase_query_ann, mock_bucket, mo
     """Test delete_by_metadata method."""
     # Properly connect the mock_collection to the instance
     couchbase_query_ann._collection = mock_collection
-    
+
     mock_scope = Mock()
     couchbase_query_ann._scope = mock_scope
     mock_result = Mock()
@@ -521,7 +532,7 @@ def test_couchbase_query_delete_by_content_id(couchbase_query_ann, mock_bucket, 
     """Test delete_by_content_id method."""
     # Properly connect the mock_collection to the instance
     couchbase_query_ann._collection = mock_collection
-    
+
     mock_scope = Mock()
     couchbase_query_ann._scope = mock_scope
     mock_result = Mock()
@@ -546,11 +557,13 @@ def test_couchbase_query_delete_by_content_id(couchbase_query_ann, mock_bucket, 
 async def test_couchbase_query_async_id_exists(couchbase_query_ann):
     """Test async_id_exists method."""
     from acouchbase.collection import AsyncCollection
+
     mock_collection_inst = AsyncMock(spec=AsyncCollection)
     mock_get_result = Mock()
     mock_collection_inst.exists = AsyncMock(return_value=mock_get_result)
 
     from agno.vectordb.couchbase.couchbase import CouchbaseQuery
+
     with patch.object(CouchbaseQuery, "get_async_collection", new_callable=AsyncMock) as mock_get_async_collection:
         mock_get_async_collection.return_value = mock_collection_inst
 
@@ -568,11 +581,13 @@ async def test_couchbase_query_async_id_exists(couchbase_query_ann):
 async def test_couchbase_query_async_name_exists(couchbase_query_ann):
     """Test async_name_exists method."""
     from acouchbase.scope import AsyncScope
+
     mock_scope_inst = AsyncMock(spec=AsyncScope)
     mock_query_result = Mock()
     mock_scope_inst.query = Mock(return_value=mock_query_result)
 
     from agno.vectordb.couchbase.couchbase import CouchbaseQuery
+
     with patch.object(CouchbaseQuery, "get_async_scope", new_callable=AsyncMock) as mock_get_async_scope:
         mock_get_async_scope.return_value = mock_scope_inst
 
@@ -597,12 +612,14 @@ async def test_couchbase_query_async_name_exists(couchbase_query_ann):
 async def test_couchbase_query_async_drop(couchbase_query_ann):
     """Test async_drop method."""
     from acouchbase.bucket import AsyncBucket
+
     mock_bucket_inst = AsyncMock(spec=AsyncBucket)
     mock_collections_mgr = AsyncMock()
     mock_bucket_inst.collections = Mock(return_value=mock_collections_mgr)
     mock_collections_mgr.drop_collection = AsyncMock()
 
     from agno.vectordb.couchbase.couchbase import CouchbaseQuery
+
     with patch.object(CouchbaseQuery, "get_async_bucket", new_callable=AsyncMock) as mock_get_async_bucket:
         mock_get_async_bucket.return_value = mock_bucket_inst
 
@@ -617,6 +634,7 @@ async def test_couchbase_query_async_drop(couchbase_query_ann):
 async def test_couchbase_query_async_exists(couchbase_query_ann):
     """Test async_exists method."""
     from acouchbase.bucket import AsyncBucket
+
     mock_bucket_inst = AsyncMock(spec=AsyncBucket)
     mock_collections_mgr = AsyncMock()
     mock_bucket_inst.collections = Mock(return_value=mock_collections_mgr)
@@ -628,10 +646,11 @@ async def test_couchbase_query_async_exists(couchbase_query_ann):
     mock_scope_obj.collections = [mock_collection_obj]
 
     from agno.vectordb.couchbase.couchbase import CouchbaseQuery
+
     with patch.object(CouchbaseQuery, "get_async_bucket", new_callable=AsyncMock) as mock_get_async_bucket:
         mock_get_async_bucket.return_value = mock_bucket_inst
         mock_collections_mgr.get_all_scopes = AsyncMock(return_value=[mock_scope_obj])
-        
+
         assert await couchbase_query_ann.async_exists() is True
         mock_get_async_bucket.assert_called_once()
         mock_collections_mgr.get_all_scopes.assert_called_once()
@@ -640,12 +659,12 @@ async def test_couchbase_query_async_exists(couchbase_query_ann):
 @pytest.mark.asyncio
 async def test_couchbase_query_async_insert(couchbase_query_ann, mock_embedder):
     """Test async_insert method."""
-    from agno.knowledge.document import Document
     import copy
+
     from acouchbase.collection import AsyncCollection
-    
+    from agno.knowledge.document import Document
+
     documents = [Document(name="doc1", content="content1"), Document(name="doc2", content="content2")]
-    filters = {"category": "test", "priority": "high"}
 
     mock_async_collection_instance = AsyncMock(spec=AsyncCollection)
     mock_async_collection_instance.insert = AsyncMock(return_value=None)
@@ -665,12 +684,12 @@ async def test_couchbase_query_async_insert(couchbase_query_ann, mock_embedder):
 @pytest.mark.asyncio
 async def test_couchbase_query_async_upsert(couchbase_query_ann, mock_embedder):
     """Test async_upsert method."""
-    from agno.knowledge.document import Document
     import copy
+
     from acouchbase.collection import AsyncCollection
-    
+    from agno.knowledge.document import Document
+
     documents = [Document(name="doc1", content="content1"), Document(name="doc2", content="content2")]
-    filters = {"category": "test", "priority": "high"}
 
     mock_async_collection_instance = AsyncMock(spec=AsyncCollection)
     mock_async_collection_instance.upsert = AsyncMock(return_value=None)
@@ -692,7 +711,9 @@ async def test_couchbase_query_async_cluster_property_caching(couchbase_query_an
     """Test the async_cluster property caching mechanism."""
     cluster_instance_1 = await couchbase_query_ann.get_async_cluster()
 
-    mock_async_cluster.connect.assert_called_once_with(couchbase_query_ann.connection_string, couchbase_query_ann.cluster_options)
+    mock_async_cluster.connect.assert_called_once_with(
+        couchbase_query_ann.connection_string, couchbase_query_ann.cluster_options
+    )
 
     mock_returned_cluster_instance = mock_async_cluster.connect.return_value
     assert couchbase_query_ann._async_cluster is cluster_instance_1
@@ -707,11 +728,13 @@ async def test_couchbase_query_async_cluster_property_caching(couchbase_query_an
 async def test_couchbase_query_async_bucket_property_caching(couchbase_query_ann):
     """Test the async_bucket property caching mechanism."""
     from acouchbase.cluster import AsyncCluster
+
     mock_cluster_inst = AsyncMock(spec=AsyncCluster)
     mock_bucket_inst = AsyncMock()
     mock_cluster_inst.bucket = Mock(return_value=mock_bucket_inst)
 
     from agno.vectordb.couchbase.couchbase import CouchbaseQuery
+
     with patch.object(CouchbaseQuery, "get_async_cluster", new_callable=AsyncMock) as mock_get_async_cluster:
         mock_get_async_cluster.return_value = mock_cluster_inst
 
@@ -735,11 +758,13 @@ async def test_couchbase_query_async_scope_property_caching(couchbase_query_ann)
     """Test the async_scope property caching mechanism."""
     from acouchbase.bucket import AsyncBucket
     from acouchbase.scope import AsyncScope
+
     mock_bucket_inst = AsyncMock(spec=AsyncBucket)
     mock_scope_inst = AsyncMock(spec=AsyncScope)
     mock_bucket_inst.scope = Mock(return_value=mock_scope_inst)
 
     from agno.vectordb.couchbase.couchbase import CouchbaseQuery
+
     with patch.object(CouchbaseQuery, "get_async_bucket", new_callable=AsyncMock) as mock_get_async_bucket:
         mock_get_async_bucket.return_value = mock_bucket_inst
 
@@ -761,13 +786,15 @@ async def test_couchbase_query_async_scope_property_caching(couchbase_query_ann)
 @pytest.mark.asyncio
 async def test_couchbase_query_async_collection_property_caching(couchbase_query_ann):
     """Test the async_collection property caching mechanism."""
-    from acouchbase.scope import AsyncScope
     from acouchbase.collection import AsyncCollection
+    from acouchbase.scope import AsyncScope
+
     mock_scope_inst = AsyncMock(spec=AsyncScope)
     mock_collection_inst = AsyncMock(spec=AsyncCollection)
     mock_scope_inst.collection = Mock(return_value=mock_collection_inst)
 
     from agno.vectordb.couchbase.couchbase import CouchbaseQuery
+
     with patch.object(CouchbaseQuery, "get_async_scope", new_callable=AsyncMock) as mock_get_async_scope:
         mock_get_async_scope.return_value = mock_scope_inst
 
@@ -790,7 +817,7 @@ def test_couchbase_query_delete_by_id_exception_handling(couchbase_query_ann, mo
     """Test delete_by_id method exception handling."""
     # Properly connect the mock_collection to the instance
     couchbase_query_ann._collection = mock_collection
-    
+
     with patch.object(couchbase_query_ann, "id_exists") as mock_id_exists:
         mock_id_exists.return_value = True
 

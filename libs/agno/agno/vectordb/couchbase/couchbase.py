@@ -1713,6 +1713,17 @@ class QueryVectorSearchSimilarity(str, Enum):
 
 
 class CouchbaseQuery(CouchbaseBase):
+    """
+    Provides vector search capabilities using Couchbase's General Secondary Indexes (GSI).
+    This class enables efficient vector similarity search via SQL++ queries leveraging GSI, 
+    available in Couchbase Server 8.0 and above. It is distinct from `CouchbaseSearch`, which 
+    uses Full Text Search (FTS) indexes for vector search.
+    Key differences from `CouchbaseSearch`:
+        - Uses GSI (SQL++/N1QL) for vector search, not FTS.
+        - Requires Couchbase Server 8.0+ with GSI vector search support.
+        - Supports different search types (ANN, KNN) and similarity metrics (COSINE, DOT, L2, etc.).
+        - May offer different performance and scalability characteristics compared to FTS.
+    """
     def __init__(
         self,
         bucket_name: str,

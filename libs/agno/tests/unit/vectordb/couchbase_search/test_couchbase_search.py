@@ -27,7 +27,6 @@ from agno.vectordb.couchbase.couchbase import (
     CouchbaseSearch,
     _convert_filter_expr_to_sql,
 )
-from agno.vectordb.distance import Distance
 
 
 # -------------------------------------------------

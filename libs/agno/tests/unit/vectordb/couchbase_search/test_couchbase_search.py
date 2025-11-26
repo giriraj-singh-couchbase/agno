@@ -793,42 +793,42 @@ def test_convert_filter_eq_string():
     """Test EQ filter with string value"""
     filter_expr = EQ(key="category", value="electronics")
     result = _convert_filter_expr_to_sql(filter_expr)
-    assert result == "d.meta_data.category = 'electronics'"
+    assert result == "d.metadata.category = 'electronics'"
 
 
 def test_convert_filter_eq_number():
     """Test EQ filter with numeric value"""
     filter_expr = EQ(key="price", value=99.99)
     result = _convert_filter_expr_to_sql(filter_expr)
-    assert result == "d.meta_data.price = 99.99"
+    assert result == "d.metadata.price = 99.99"
 
 
 def test_convert_filter_gt():
     """Test GT (greater than) filter"""
     filter_expr = GT(key="rating", value=4.5)
     result = _convert_filter_expr_to_sql(filter_expr)
-    assert result == "d.meta_data.rating > 4.5"
+    assert result == "d.metadata.rating > 4.5"
 
 
 def test_convert_filter_lt():
     """Test LT (less than) filter"""
     filter_expr = LT(key="stock", value=10)
     result = _convert_filter_expr_to_sql(filter_expr)
-    assert result == "d.meta_data.stock < 10"
+    assert result == "d.metadata.stock < 10"
 
 
 def test_convert_filter_in_strings():
     """Test IN filter with string values"""
     filter_expr = IN(key="color", values=["red", "blue", "green"])
     result = _convert_filter_expr_to_sql(filter_expr)
-    assert result == "d.meta_data.color IN ['red', 'blue', 'green']"
+    assert result == "d.metadata.color IN ['red', 'blue', 'green']"
 
 
 def test_convert_filter_in_numbers():
     """Test IN filter with numeric values"""
     filter_expr = IN(key="size", values=[8, 9, 10, 11])
     result = _convert_filter_expr_to_sql(filter_expr)
-    assert result == "d.meta_data.size IN [8, 9, 10, 11]"
+    assert result == "d.metadata.size IN [8, 9, 10, 11]"
 
 
 def test_convert_filter_and():
@@ -838,7 +838,7 @@ def test_convert_filter_and():
         GT(key="price", value=50)
     )
     result = _convert_filter_expr_to_sql(filter_expr)
-    assert result == "(d.meta_data.category = 'electronics' AND d.meta_data.price > 50)"
+    assert result == "(d.metadata.category = 'electronics' AND d.metadata.price > 50)"
 
 
 def test_convert_filter_or():
@@ -848,14 +848,14 @@ def test_convert_filter_or():
         EQ(key="color", value="blue")
     )
     result = _convert_filter_expr_to_sql(filter_expr)
-    assert result == "(d.meta_data.color = 'red' OR d.meta_data.color = 'blue')"
+    assert result == "(d.metadata.color = 'red' OR d.metadata.color = 'blue')"
 
 
 def test_convert_filter_not():
     """Test NOT filter negating a condition"""
     filter_expr = NOT(expression=EQ(key="discontinued", value="true"))
     result = _convert_filter_expr_to_sql(filter_expr)
-    assert result == "NOT (d.meta_data.discontinued = 'true')"
+    assert result == "NOT (d.metadata.discontinued = 'true')"
 
 
 def test_convert_filter_list_implicit_and():
@@ -866,7 +866,7 @@ def test_convert_filter_list_implicit_and():
         LT(key="price", value=30)
     ]
     result = _convert_filter_expr_to_sql(filter_list)
-    assert result == "(d.meta_data.category = 'books' AND d.meta_data.rating > 4.0 AND d.meta_data.price < 30)"
+    assert result == "(d.metadata.category = 'books' AND d.metadata.rating > 4.0 AND d.metadata.price < 30)"
 
 
 def test_convert_filter_empty_list():
@@ -886,7 +886,7 @@ def test_convert_filter_complex_nested():
         NOT(expression=EQ(key="refurbished", value="true"))
     )
     result = _convert_filter_expr_to_sql(filter_expr)
-    expected = "((d.meta_data.category = 'electronics' OR d.meta_data.category = 'computers') AND d.meta_data.price > 100 AND NOT (d.meta_data.refurbished = 'true'))"
+    expected = "((d.metadata.category = 'electronics' OR d.metadata.category = 'computers') AND d.metadata.price > 100 AND NOT (d.metadata.refurbished = 'true'))"
     assert result == expected
 
 

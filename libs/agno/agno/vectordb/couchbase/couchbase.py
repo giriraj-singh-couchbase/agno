@@ -118,7 +118,6 @@ class CouchbaseBase(VectorDb):
         embedder: Embedder = OpenAIEmbedder(),
         embedding_key: str = "embedding",
         metadata_key: str = "metadata",
-        text_field: str = "content",
         overwrite: bool = False,
         batch_limit: int = 500,
         name: Optional[str] = None,
@@ -135,7 +134,6 @@ class CouchbaseBase(VectorDb):
         self.embedder = embedder
         self.embedding_key = embedding_key
         self.metadata_key = metadata_key
-        self.text_field = text_field
         self.overwrite = overwrite
         self.batch_limit = batch_limit
         # Optional base QueryOptions provided by user. Will be merged with per-query dynamic parameters.
@@ -488,7 +486,7 @@ class CouchbaseBase(VectorDb):
             
             # Use configured field names only
             try:
-                content = value.get(self.text_field, "")
+                content = value.get("content", "")
                 meta_data = value.get(self.metadata_key, {})
                 
                 documents.append(
@@ -1345,7 +1343,6 @@ class CouchbaseSearch(CouchbaseBase):
         embedder: Embedder = OpenAIEmbedder(),
         embedding_key: str = "embedding",
         metadata_key: str = "metadata",
-        text_field: str = "content",
         overwrite: bool = False,
         is_global_level_index: bool = False,
         wait_until_index_ready: float = 0,
@@ -1385,7 +1382,6 @@ class CouchbaseSearch(CouchbaseBase):
             description=description,
             embedding_key=embedding_key,
             metadata_key=metadata_key,
-            text_field=text_field,
         )
         self.is_global_level_index = is_global_level_index
         self.wait_until_index_ready = wait_until_index_ready
@@ -1668,7 +1664,7 @@ class CouchbaseSearch(CouchbaseBase):
                         continue
 
                     # Use configured field names only
-                    content = value.get(self.text_field, "")
+                    content = value.get("content", "")
                     meta_data = value.get(self.metadata_key, {})
 
                     documents.append(
@@ -1720,7 +1716,6 @@ class CouchbaseQuery(CouchbaseBase):
         embedder: Embedder = OpenAIEmbedder(),
         embedding_key: str = "embedding",
         metadata_key: str = "metadata",
-        text_field: str = "content",
         overwrite: bool = False,
         batch_limit: int = 500,
         name: Optional[str] = None,
@@ -1740,7 +1735,6 @@ class CouchbaseQuery(CouchbaseBase):
             description=description,
             embedding_key=embedding_key,
             metadata_key=metadata_key,
-            text_field=text_field,
         )
         if isinstance(search_type, str):
             self._search_type = QueryVectorSearchType(search_type)
@@ -1832,7 +1826,7 @@ class CouchbaseQuery(CouchbaseBase):
             for row in result.rows():
                 doc_id = row.get("id", "")
                 name = row.get("name", "")
-                content = row.get(self.text_field, "")
+                content = row.get("content", "")
                 meta_data = row.get(self.metadata_key, {})
                 embedding = row.get(self.embedding_key, [])
                 content_id = row.get("content_id")
@@ -1946,7 +1940,7 @@ class CouchbaseQuery(CouchbaseBase):
                 try:
                     doc_id = row.get("id")
                     name = row.get("name", "")
-                    content = row.get(self.text_field, "")
+                    content = row.get("content", "")
                     meta_data = row.get(self.metadata_key, {})
                     embedding = row.get(self.embedding_key, [])
                     content_id = row.get("content_id")

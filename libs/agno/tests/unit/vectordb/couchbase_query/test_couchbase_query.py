@@ -100,14 +100,14 @@ def test_couchbase_query_init_with_enums(couchbase_query_ann):
     assert couchbase_query_ann._search_type == QueryVectorSearchType.ANN
     assert couchbase_query_ann._similarity == "COSINE"
     assert couchbase_query_ann._nprobes == 10
-    assert couchbase_query_ann._embedding_key == "embedding"
+    assert couchbase_query_ann.embedding_key == "embedding"
 
 
 def test_couchbase_query_init_with_strings(couchbase_query_knn):
     assert couchbase_query_knn._search_type == QueryVectorSearchType.KNN
     assert couchbase_query_knn._similarity == "DOT"
     assert couchbase_query_knn._nprobes is None
-    assert couchbase_query_knn._embedding_key == "embedding"
+    assert couchbase_query_knn.embedding_key == "embedding"
 
 
 def test_couchbase_query_create(couchbase_query_ann, mock_bucket):
@@ -351,4 +351,4 @@ def test_couchbase_query_custom_embedding_key(mock_collection, mock_embedder):
         embedder=mock_embedder,
         embedding_key="custom_embedding_field",
     )
-    assert query_db._embedding_key == "custom_embedding_field"
+    assert query_db.embedding_key == "custom_embedding_field"

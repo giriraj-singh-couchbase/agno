@@ -50,12 +50,14 @@ except ImportError:
     raise ImportError("`couchbase` not installed. Please install using `pip install couchbase`")
 
 
-def _convert_filter_expr_to_sql(filter_expr: FilterExpr, metadata_prefix: str = "d.metadata") -> str:
+def _convert_filter_expr_to_sql(
+    filter_expr: Union[FilterExpr, List[FilterExpr]], metadata_prefix: str = "d.metadata"
+) -> str:
     """
     Convert agno FilterExpr to SQL++ WHERE clause.
     
     Args:
-        filter_expr: The filter expression to convert
+        filter_expr: The filter expression to convert (single or list)
         metadata_prefix: The prefix for metadata fields in the SQL query (e.g., 'd.metadata')
         
     Returns:
